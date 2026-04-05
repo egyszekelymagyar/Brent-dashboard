@@ -6,10 +6,10 @@ import plotly.graph_objects as go
 from datetime import datetime
 import pytz
 
-# --- ELITE TERMINAL CONFIG ---
+# --- KONFIGURÁCIÓ ---
 st.set_page_config(page_title="Brent AI - Global Alpha", layout="wide", page_icon="🏦")
 
-# HIGH-CONTRAST CSS
+# HIGH-CONTRAST STÍLUS LAP
 st.markdown("""
     <style>
     .main { background-color: #0e1117; }
@@ -81,7 +81,7 @@ try:
     c4.metric("RSI (1m)", f"{float(latest_m['RSI']):.1f}")
     c5.metric("JAN TREND", "BULLISH" if latest_j['Close'] > latest_j['EMA_Trend'] else "BEARISH")
 
-    # --- HIBRID LOGIKA ---
+    # --- HIBRID DÖNTÉSI LOGIKA ---
     score = 0
     reasons = []
     if latest_m['Close'] > latest_m['Upper']: score += 2; reasons.append("1m Breakout")
@@ -101,16 +101,25 @@ try:
         </div>
     """, unsafe_allow_html=True)
 
-    # --- JAVÍTOTT GRAFIKON (Opacity hiba elhárítva) ---
-    st.subheader("📊 Élő Perces Monitor")
+    # --- GRAFIKON (Javított színekkel és opacity-vel) ---
+    st.subheader("📊 Élő Perces Monitor (Optimalizált)")
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=df_m.index[-120:], y=df_m['Close'].iloc[-120:], name="Ár", line=dict(color="#00ffcc", width=3)))
-    # Opacity paraméter a Scatter-en belülre került a Line-ból:
-    fig.add_trace(go.Scatter(x=df_m.index[-120:], y=df_m['Upper'].iloc[-120:], name="Felső", line=dict(color="#ffffff", dash="dot"), opacity=0.3))
-    fig.add_trace(go.Scatter(x=df_m.index[-120:], y=df_m['Lower'].iloc[-120:], name="Alsó", line=dict(color="#ffffff", dash="dot"), opacity=0.3))
+    
+    # JAVÍTÁS: Az opacity most már a marker/line színekben van megadva (RGBA), vagy külön paraméterként
+    fig.add_trace(go.Scatter(
+        x=df_m.index[-120:], y=df_m['Upper'].iloc[-120:], 
+        name="Felső", 
+        line=dict(color='rgba(255, 255, 255, 0.3)', dash='dot')
+    ))
+    fig.add_trace(go.Scatter(
+        x=df_m.index[-120:], y=df_m['Lower'].iloc[-120:], 
+        name="Alsó", 
+        line=dict(color='rgba(255, 255, 255, 0.3)', dash='dot')
+    ))
     
     fig.update_layout(template="plotly_dark", height=450, paper_bgcolor='#0e1117', plot_bgcolor='#0e1117', margin=dict(l=0,r=0,t=0,b=0))
     st.plotly_chart(fig, use_container_width=True)
 
 except Exception as e:
-    st.info("Várakozás a vasárnap éjféli nyitásra. Az adatok és a grafikonok ekkor frissülnek élőben.")
+    st.info("Várakozás a vasárnap éjféli nyitásra. Az adatok és grafikonok ekkor frissülnek élőben.")
