@@ -1,10 +1,10 @@
-streamlit
+streamlit==1.29.0
 requests
 pandas
 numpy
 pandas_ta
 scikit-learn
-tensorflow
-transformers
+tensorflow-cpu==2.13.0
+transformers==4.31.0
 newsapi-python
 matplotlib
