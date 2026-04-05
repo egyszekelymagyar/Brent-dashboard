@@ -1,10 +1,9 @@
 streamlit==1.29.0
-requests
 pandas
 numpy
+matplotlib
 pandas_ta
 scikit-learn
 tensorflow-cpu==2.13.0
 transformers==4.31.0
-newsapi-python
-matplotlib
+yfinance
