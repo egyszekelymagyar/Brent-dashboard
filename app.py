@@ -6,124 +6,153 @@ import matplotlib.pyplot as plt
 from sklearn.linear_model import LinearRegression
 import requests
 
-st.set_page_config(page_title="Brent Dashboard", layout="wide")
-st.title("Brent olaj – teljes dashboard")
+# Oldal konfiguráció
+st.set_page_config(page_title="Brent Dashboard - Trend Analízis", layout="wide")
+
+st.title("🛢️ Brent Olaj Dashboard & Trend Analízis")
 
 # --- BEÁLLÍTÁSOK ---
-TELEGRAM_TOKEN = ""   
-TELEGRAM_CHAT_ID = "" 
+TELEGRAM_TOKEN = ""   # Ide másold a BotFather-től kapott tokent
+TELEGRAM_CHAT_ID = "" # Ide a saját Chat ID-dat
+NEWS_API_KEY = "YOUR_API_KEY" # Opcionális: NewsAPI kulcs
 
-# --- ADATBETÖLTÉS ---
+# --- ADATBETÖLTÉS ÉS JAVÍTÁS ---
 @st.cache_data
 def load_data():
-    # Az auto_adjust és a MultiIndex kezelése miatt fixáljuk az oszlopokat
-    data = yf.download("BZ=F", period="6mo", interval="1d")
+    # Adatok letöltése
+    data = yf.download("BZ=F", period="1y", interval="1d")
     
-    # JAVÍTÁS: Ha MultiIndex van (új yfinance hiba), leegyszerűsítjük
+    # 1. JAVÍTÁS: yfinance MultiIndex hiba elhárítása (ez okozta a ValueError-t)
     if isinstance(data.columns, pd.MultiIndex):
         data.columns = data.columns.get_level_values(0)
     
+    # Biztosítjuk, hogy ne legyenek üres sorok az elején
     return data.dropna()
 
-df_raw = load_data()
-df = df_raw.copy()
+try:
+    df_raw = load_data()
+    df = df_raw.copy()
 
-# --- INDIKÁTOROK ---
-def add_indicators(df):
-    df["SMA_20"] = df["Close"].rolling(window=20).mean()
-    df["EMA_20"] = df["Close"].ewm(span=20, adjust=False).mean()
+    # --- INDIKÁTOROK SZÁMÍTÁSA ---
+    def add_indicators(df):
+        # Mozgóátlagok a trendhez
+        df["SMA_20"] = df["Close"].rolling(window=20).mean()
+        df["EMA_20"] = df["Close"].ewm(span=20, adjust=False).mean()
 
-    delta = df["Close"].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        # RSI számítás
+        delta = df["Close"].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df["RSI"] = 100 - (100 / (1 + rs))
+        return df
+
+    df = add_indicators(df)
+
+    # --- OKOS TREND ANALÍZIS ---
+    def get_trend_analysis(df):
+        # Csak azokat a sorokat nézzük, ahol minden indikátor kész
+        valid_df = df.dropna(subset=["RSI", "SMA_20", "EMA_20"])
+        
+        if valid_df.empty:
+            return "Nincs elég adat", "gray", 0
+        
+        latest = valid_df.iloc[-1]
+        prev = valid_df.iloc[-2]
+        
+        price = latest["Close"]
+        rsi = latest["RSI"]
+        ema = latest["EMA_20"]
+        
+        score = 0
+        # 1. RSI alapú jelzés
+        if rsi < 35: score += 1  # Túladott -> Vétel felé
+        elif rsi > 65: score -= 1 # Túlvett -> Eladás felé
+        
+        # 2. Mozgóátlag trend (Ár az átlag felett = Emelkedő trend)
+        if price > ema: score += 1
+        else: score -= 1
+        
+        # 3. Rövid távú irány (Nőtt-e az ár tegnap óta?)
+        if price > prev["Close"]: score += 1
+        else: score -= 1
+
+        # Kiértékelés
+        if score >= 2: return "ERŐS EMELKEDÉS (BULLISH)", "#00ff00", score
+        if score == 1: return "MÉRSÉKELT EMELKEDÉS", "#ccffcc", score
+        if score <= -2: return "ERŐS CSÖKKENÉS (BEARISH)", "#ff0000", score
+        if score == -1: return "MÉRSÉKELT CSÖKKENÉS", "#ffcccc", score
+        return "OLDALAZÁS / BIZONYTALAN", "#cccccc", score
+
+    signal_text, signal_color, score = get_trend_analysis(df)
+
+    # --- UI ELRENDEZÉS ---
+    col1, col2 = st.columns([2, 1])
+
+    with col1:
+        st.subheader("Árfolyam és Indikátorok")
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.plot(df.index, df["Close"], label="Záróár", color="blue", linewidth=2)
+        ax.plot(df.index, df["SMA_20"], label="SMA 20 (Trend)", linestyle="--", alpha=0.7)
+        ax.plot(df.index, df["EMA_20"], label="EMA 20 (Gyors)", alpha=0.7)
+        ax.legend()
+        ax.grid(alpha=0.3)
+        st.pyplot(fig)
+
+    with col2:
+        st.subheader("Várható Irány")
+        st.markdown(f"""
+            <div style="background-color:{signal_color}; padding:20px; border-radius:10px; text-align:center;">
+                <h2 style="color:black; margin:0;">{signal_text}</h2>
+                <p style="color:black; font-size:18px;">Trend pontszám: {score}</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        st.write("")
+        st.metric("Aktuális Ár", f"{df['Close'].iloc[-1]:.2f} USD", f"{df['Close'].iloc[-1] - df['Close'].iloc[-2]:.2f}")
+        st.metric("RSI Érték", f"{df['RSI'].iloc[-1]:.1f}")
+
+    # --- ELŐREJELZÉS (LINEAR REGRESSION) ---
+    st.divider()
+    st.subheader("Lineáris Trend-előrejelzés (Következő 5 nap)")
     
-    rs = gain / loss
-    df["RSI"] = 100 - (100 / (1 + rs))
-    return df
-
-df = add_indicators(df)
-
-# --- SIGNAL SZÁMÍTÁS (HIBAJAVÍTÁSSAL) ---
-def get_signal(df):
-    # Csak azokat a sorokat nézzük, ahol már van RSI (nincs NaN)
-    valid_df = df.dropna(subset=["RSI"])
+    df_p = df.dropna(subset=["Close"]).copy()
+    df_p["t"] = np.arange(len(df_p))
     
-    if valid_df.empty:
-        return "NINCS ADAT"
+    model = LinearRegression()
+    model.fit(df_p[["t"]], df_p["Close"])
     
-    latest = valid_df.iloc[-1]
-    rsi_val = latest["RSI"]
+    future_t = np.arange(len(df_p), len(df_p) + 5).reshape(-1, 1)
+    future_preds = model.predict(future_t)
+    future_dates = pd.date_range(start=df_p.index[-1] + pd.Timedelta(days=1), periods=5)
 
-    if rsi_val < 30:
-        return "BUY"
-    elif rsi_val > 70:
-        return "SELL"
-    else:
-        return "HOLD"
-
-signal = get_signal(df)
-
-# --- TELEGRAM ---
-def send_telegram(msg):
-    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        try:
-            requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
-        except:
-            st.error("Telegram küldési hiba!")
-
-# --- UI MEGJELENÍTÉS ---
-col1, col2 = st.columns(2)
-
-with col1:
-    st.subheader("Ár + indikátorok")
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(df.index, df["Close"], label="Ár", color="blue")
-    ax.plot(df.index, df["SMA_20"], label="SMA 20", alpha=0.7)
-    ax.plot(df.index, df["EMA_20"], label="EMA 20", alpha=0.7)
-    ax.legend()
-    st.pyplot(fig)
-
-with col2:
-    st.subheader("RSI Indikátor")
-    fig2, ax2 = plt.subplots(figsize=(10, 5))
-    ax2.plot(df.index, df["RSI"], label="RSI", color="purple")
-    ax2.axhline(70, linestyle="--", color="red", alpha=0.5)
-    ax2.axhline(30, linestyle="--", color="green", alpha=0.5)
-    ax2.set_ylim(0, 100)
+    fig2, ax2 = plt.subplots(figsize=(12, 3))
+    ax2.plot(df_p.index[-20:], df_p["Close"].iloc[-20:], label="Múltbeli")
+    ax2.plot(future_dates, future_preds, 'r--', marker='o', label="Becsült irány")
     ax2.legend()
     st.pyplot(fig2)
 
-# --- SIGNAL ÉS TELEGRAM ---
-st.divider()
-c1, c2, c3 = st.columns(3)
-with c1:
-    st.metric("Aktuális jelzés", signal)
-with c2:
-    st.metric("Utolsó ár", f"{df['Close'].iloc[-1]:.2f} USD")
-with c3:
-    if st.button("Küldés Telegramra"):
-        send_telegram(f"Brent jelzés: {signal} (Ár: {df['Close'].iloc[-1]:.2f})")
-        st.success("Üzenet elküldve!")
+    # --- TELEGRAM ÉS HÍREK ---
+    st.divider()
+    c_left, c_right = st.columns(2)
 
-# --- ELŐREJELZÉS (LINEAR REGRESSION) ---
-st.subheader("Lineáris előrejelzés (5 nap)")
-df_pred = df.dropna(subset=["Close"]).copy()
-df_pred["t"] = np.arange(len(df_pred))
+    with c_left:
+        if st.button("🚨 Jelzés küldése Telegramra"):
+            msg = f"Brent Jelzés: {signal_text}\nÁr: {df['Close'].iloc[-1]:.2f} USD\nRSI: {df['RSI'].iloc[-1]:.1f}"
+            if TELEGRAM_TOKEN:
+                url = f"https://telegram.org{TELEGRAM_TOKEN}/sendMessage"
+                requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
+                st.success("Sikeres küldés!")
+            else:
+                st.warning("Nincs megadva Telegram Token!")
 
-model = LinearRegression()
-model.fit(df_pred[["t"]], df_pred["Close"])
+    with c_right:
+        st.write("**Elemzői megjegyzés:**")
+        if score > 0:
+            st.write("A technikai indikátorok alapján az árfolyamnak tere van a további emelkedésre.")
+        else:
+            st.write("A trend jelenleg gyengülést mutat, óvatosság javasolt a vétellel.")
 
-future_days = 5
-last_t = df_pred["t"].iloc[-1]
-future_t = np.arange(last_t + 1, last_t + 1 + future_days).reshape(-1, 1)
-pred = model.predict(future_t)
-
-# Dátumok generálása a jövőre
-future_dates = pd.date_range(start=df_pred.index[-1] + pd.Timedelta(days=1), periods=future_days)
-
-fig3, ax3 = plt.subplots(figsize=(12, 4))
-ax3.plot(df_pred.index[-30:], df_pred["Close"].iloc[-30:], label="Múltbeli ár")
-ax3.plot(future_dates, pred, 'r--', label="Előrejelzés", marker='o')
-ax3.legend()
-st.pyplot(fig3)
+except Exception as e:
+    st.error(f"Hiba történt az adatok feldolgozása során: {e}")
+    st.info("Tipp: Ellenőrizd az internetkapcsolatot vagy próbáld meg később, ha a Yahoo Finance szervere nem válaszol.")
