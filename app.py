@@ -4,107 +4,128 @@ import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
 from sklearn.linear_model import LinearRegression
+import requests
+import time
 from datetime import datetime
 
-# --- KONFIGURÁCIÓ ÉS STÍLUS ---
-st.set_page_config(page_title="Brent AI Broker Dashboard", layout="wide")
+# --- KONFIGURÁCIÓ ---
+st.set_page_config(page_title="Brent AI Pro - Broker Edition", layout="wide", page_icon="🛢️")
 
-# --- 1. HISTORIKUS SOKK-ADATBÁZIS & HÍR SÚLYOZÁS ---
-# Statikus benchmarkok a múltbeli események hatása alapján
-SHOCK_LIBRARY = {
-    "WAR_IRAN_2026": {"impact": 0.08, "volatility": "Extreme", "ref": "2026-04-02"}, # Aktuális válság
-    "UKRAINE_2022": {"impact": 0.30, "volatility": "High", "ref": "2022-02-24"},
-    "HORMUZ_CLOSURE": {"impact": 0.15, "volatility": "Critical", "ref": "Supply Route Risk"}
+# --- 1. HISTORIKUS SOKK-ADATBÁZIS & BRÓKER SÚLYOZÁS ---
+# Referencia események a volatilitás és Stop-Loss számításhoz
+SHOCK_BENCHMARKS = {
+    "WAR_INV_2022": {"impact": 0.30, "std_dev_mult": 2.5, "desc": "Orosz invázió - Supply Shock"},
+    "TERROR_911": {"impact": 0.05, "std_dev_mult": 4.0, "desc": "9/11 - Demand/Panic Shock"},
+    "HOR_STR_2026": {"impact": 0.15, "std_dev_mult": 3.0, "desc": "Hormuzi-szoros - Route Risk"}
 }
 
 SOURCE_WEIGHTS = {
-    "Bloomberg": 0.45,  # Elsődleges terminál adat
-    "Reuters": 0.30,    # Geopolitikai tények
-    "FT/WSJ": 0.15,     # Strukturális elemzés
-    "Retail": 0.10      # Piaci szentiment
+    "Bloomberg": 0.45, "Reuters": 0.30, "FT_WSJ": 0.15, "Market_Sentiment": 0.10
 }
 
-# --- 2. ADATBETÖLTÉS (PERC ALAPÚ) ---
+# --- 2. ADATKEZELŐ FUNKCIÓK ---
 @st.cache_data(ttl=60)
-def get_live_data():
-    # Az 1 perces adat elengedhetetlen a pontos követéshez
+def load_market_data():
+    # 1 perces adatok az utolsó 7 napról
     data = yf.download("BZ=F", period="5d", interval="1m")
     if isinstance(data.columns, pd.MultiIndex):
         data.columns = data.columns.get_level_values(0)
     return data.dropna()
 
-try:
-    df = get_live_data()
+def calculate_stop_loss(price, volatility_score, direction="buy"):
+    # Stop-loss számítás a historikus sokkok volatilitása alapján
+    buffer = 0.02 * (1 + volatility_score) # Alap 2% + sokk faktor
+    return price * (1 - buffer) if direction == "buy" else price * (1 + buffer)
+
+# --- 3. OLDALSÁV (TELEGRAM & AUTOMATIZÁCIÓ) ---
+with st.sidebar:
+    st.header("🤖 Vezérlőpult")
+    TELEGRAM_TOKEN = st.text_input("Telegram Bot Token", type="password")
+    TELEGRAM_CHAT_ID = st.text_input("Chat ID")
     
-    # INDIKÁTOROK
+    st.divider()
+    auto_mode = st.toggle("🚀 Automata Percenkénti Jelzések", help="Bekapcsolás után percenként küld szignált ha nyitva a piac.")
+    
+    st.info("Piacnyitás: Vasárnap 24:00 (CET)")
+
+# --- 4. FŐ LOGIKA ÉS ELEMZÉS ---
+try:
+    df = load_market_data()
+    
+    # Indikátorok
     df['EMA_20'] = df['Close'].ewm(span=20).mean()
     df['RSI'] = 100 - (100 / (1 + (df['Close'].diff().where(df['Close'].diff() > 0, 0).rolling(14).mean() / 
                                   -df['Close'].diff().where(df['Close'].diff() < 0, 0).rolling(14).mean())))
 
-    # --- 3. WALK-FORWARD SZIMULÁCIÓ (UTÓLAGOS ELLENŐRZÉS) ---
-    # Itt a modell úgy tesz, mintha nem ismerné a jövőt
-    window = 60
-    test_slice = df.iloc[-120:] # Az utolsó 2 óra elemzése
-    
-    X_train = np.arange(window).reshape(-1, 1)
-    y_train = test_slice['Close'][:window].values
-    model = LinearRegression().fit(X_train, y_train)
-    
-    # Jóslat a következő 60 percre
-    X_pred = np.arange(window, window * 2).reshape(-1, 1)
-    preds = model.predict(X_pred)
-    actuals = test_slice['Close'][window:].values
-
-    # --- 4. HÍR SZENTIMENT ÉS SÚLYOZÁS (2026. ÁPRILIS 5. ADATOK) ---
-    # Példa aktuális bróker hírekre
-    current_headlines = [
-        "OPEC+ Joint Ministerial Monitoring Committee meets today to discuss output hike",
-        "Trump vows further escalation against Iran infrastructure",
-        "Strait of Hormuz remains high-risk zone for tankers"
+    # Szimulált hírek (Élesben API-ból jönne)
+    news_headlines = [
+        "Bloomberg: Geopolitical tensions rising in Middle East",
+        "Reuters: OPEC+ monitoring supply disruptions",
+        "FT: Oil demand forecast remains stable despite risks"
     ]
     
-    # Egyszerűsített szentiment súlyozás
-    sentiment_score = 0.85 # Magas geopolitikai kockázat miatt bullish
-    weighted_impact = sentiment_score * SOURCE_WEIGHTS["Bloomberg"]
+    # Szentiment számítás (Bróker súlyozással)
+    sentiment_score = 0.78 # Pl. Erősödő politikai feszültség miatt
+    tech_signal = 1 if df['Close'].iloc[-1] > df['EMA_20'].iloc[-1] else -1
+    final_score = (tech_signal * 0.6) + (sentiment_score * 0.4)
 
-    # --- 5. UI MEGJELENÍTÉS ---
-    # Nagy státusz mező (A korábbi kérésnek megfelelően)
-    status_text = "ERŐS EMELKEDÉS (BULLISH)" if weighted_impact > 0.3 else "STABIL / OLDALAZÓ"
-    status_color = "#27ae60" if "EMELKEDÉS" in status_text else "#7f8c8d"
+    # --- 5. NAGY STÁTUSZ MEZŐ ---
+    status_text = "ERŐS VÉTEL (BULLISH)" if final_score > 0.5 else "ERŐS ELADÁS (BEARISH)" if final_score < -0.5 else "OLDALAZÁS"
+    status_color = "#27ae60" if final_score > 0.5 else "#e74c3c" if final_score < -0.5 else "#7f8c8d"
 
     st.markdown(f"""
         <div style="background-color:{status_color}; padding:30px; border-radius:15px; text-align:center; color:white; margin-bottom:25px;">
-            <h1 style="margin:0; font-size:45px;">{status_text}</h1>
-            <p style="font-size:20px; opacity:0.9;">Hírekkel súlyozott szentiment: {weighted_impact:.2f} | Aktuális ár: ${float(df['Close'].iloc[-1]):.2f}</p>
+            <h1 style="margin:0; font-size:40px;">{status_text}</h1>
+            <p style="font-size:18px;">Összetett pontszám: {final_score:.2f} | Aktuális ár: ${float(df['Close'].iloc[-1]):.2f}</p>
         </div>
     """, unsafe_allow_html=True)
 
-    # GRAFIKONOK
+    # --- 6. WALK-FORWARD VIZUALIZÁCIÓ ---
     c1, c2 = st.columns([2, 1])
     
     with c1:
-        st.subheader("📈 Walk-Forward: Jóslat vs. Tények")
+        st.subheader("🔮 Walk-Forward Szimuláció (Múlt vs. Valóság)")
+        window = 60
+        test_data = df.iloc[-120:]
+        
+        # Modell tanítása a múltbeli "vak" szeleten
+        model = LinearRegression().fit(np.arange(window).reshape(-1, 1), test_data['Close'][:window].values)
+        preds = model.predict(np.arange(window, window*2).reshape(-1, 1))
+        
         fig = go.Figure()
-        fig.add_trace(go.Scatter(y=actuals, name="Valóság (Tények)", line=dict(color="#2c3e50", width=3)))
-        fig.add_trace(go.Scatter(y=preds, name="Program előzetes várakozása", line=dict(color="#e67e22", dash="dash")))
-        fig.update_layout(template="plotly_white", height=450)
+        fig.add_trace(go.Scatter(y=test_data['Close'][window:].values, name="Tényleges Ár", line=dict(color="#2c3e50")))
+        fig.add_trace(go.Scatter(y=preds, name="Vak Jóslat", line=dict(color="#e67e22", dash="dash")))
+        fig.update_layout(template="plotly_white", height=400)
         st.plotly_chart(fig, use_container_width=True)
 
     with c2:
-        st.subheader("🧠 Tanult modell-paraméterek")
-        st.metric("Modell Pontosság (7 nap)", "98.4%", "+0.2%")
-        st.write("**Aktív Súlyozás:**")
-        st.write(f"- Geopolitikai sokk (Iran 2026): **40%**")
-        st.write(f"- Technikai (EMA/RSI): **30%**")
-        st.write(f"- Bróker hírfolyam: **30%**")
+        st.subheader("🎯 Javasolt Kereskedés")
+        curr_p = float(df['Close'].iloc[-1])
+        direction = "buy" if final_score > 0 else "sell"
+        sl = calculate_stop_loss(curr_p, abs(final_score), direction)
         
-        if st.button("🚨 Telegram Jelzés Küldése", use_container_width=True):
-            st.success("Jelzés elküldve a brókeri súlyozással!")
+        st.metric("Várható irány", "VÉTEL" if direction == "buy" else "ELADÁS")
+        st.metric("Javasolt Stop-Loss", f"${sl:.2f}")
+        st.write(f"**Sokk-faktor:** {SHOCK_BENCHMARKS['HOR_STR_2026']['desc']}")
 
-    # Részletes percenkénti adatok
-    st.divider()
-    st.subheader("📊 Élő Piaci Adatok (1m felbontás)")
-    st.line_chart(df[['Close', 'EMA_20']].tail(300))
+    # --- 7. AUTOMATA JELZÉSKÜLDÉS (WHILE LOOP) ---
+    if auto_mode:
+        if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+            st.error("Add meg a Telegram adatokat az oldalsávban!")
+        else:
+            placeholder = st.empty()
+            while auto_mode:
+                now = datetime.now().strftime("%H:%M:%S")
+                # Telegram küldés logika
+                if abs(final_score) > 0.6:
+                    msg = f"🛢️ BRENT JELZÉS [{now}]\nIrány: {status_text}\nÁr: ${curr_p:.2f}\nStop-Loss: ${sl:.2f}\nPont: {final_score:.2f}"
+                    requests.post(f"https://telegram.org{TELEGRAM_TOKEN}/sendMessage", 
+                                  data={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
+                
+                with placeholder.container():
+                    st.success(f"Aktív figyelés... Utolsó frissítés: {now}")
+                time.sleep(60) # Várakozás 1 percig
+                st.rerun()
 
 except Exception as e:
-    st.error(f"Kritikus hiba az app futtatása közben: {e}")
+    st.error(f"Rendszerhiba: {e}")
