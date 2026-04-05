@@ -1,0 +1,10 @@
+streamlit
+requests
+pandas
+numpy
+pandas_ta
+scikit-learn
+tensorflow
+transformers
+newsapi-python
+matplotlib
