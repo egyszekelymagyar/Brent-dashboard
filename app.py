@@ -4,108 +4,133 @@ import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
 from datetime import datetime
+import pytz
 import requests
 
-# --- HIGH-CONTRAST TERMINAL CONFIG ---
-st.set_page_config(page_title="Brent AI - High Contrast", layout="wide", page_icon="🏦")
+# --- ELITE TERMINAL CONFIG ---
+st.set_page_config(page_title="Brent AI - Global Alpha", layout="wide", page_icon="🏦")
 
-# JAVÍTOTT CSS: Világos szöveg, neon keretek, olvasható metrikák
+# HIGH-CONTRAST CSS
 st.markdown("""
     <style>
     .main { background-color: #0e1117; }
-    /* Metrika kártyák javítása */
     div[data-testid="stMetric"] {
         background-color: #1a1c24;
         border: 2px solid #30363d;
-        padding: 20px;
-        border-radius: 12px;
+        padding: 15px;
+        border-radius: 10px;
     }
-    div[data-testid="stMetricLabel"] { color: #ffffff !important; font-size: 18px !important; }
-    div[data-testid="stMetricValue"] { color: #00ffcc !important; font-size: 32px !important; font-weight: bold !important; }
+    div[data-testid="stMetricLabel"] { color: #ffffff !important; font-size: 14px !important; }
+    div[data-testid="stMetricValue"] { color: #00ffcc !important; font-size: 24px !important; }
     
-    /* Nagy szignál box javítása */
     .signal-box {
-        padding: 40px;
-        border-radius: 20px;
+        padding: 30px;
+        border-radius: 15px;
         text-align: center;
-        font-weight: bold;
-        border: 4px solid;
-        margin-bottom: 25px;
+        border: 3px solid #ffffff;
+        margin-bottom: 20px;
     }
-    .signal-title { font-size: 55px; margin: 0; color: #ffffff; text-shadow: 2px 2px 4px #000000; }
-    .signal-reason { font-size: 22px; margin-top: 15px; color: #ffffff; font-weight: normal; }
+    .signal-title { font-size: 48px; margin: 0; color: #ffffff; font-weight: bold; text-shadow: 2px 2px 4px #000; }
+    .signal-reason { font-size: 18px; margin-top: 10px; color: #ffffff; }
     </style>
     """, unsafe_allow_html=True)
 
-@st.cache_data(ttl=60)
-def get_market_data():
-    m1 = yf.download("BZ=F", period="5d", interval="1m").dropna()
-    m5 = yf.download("BZ=F", period="5d", interval="5m").dropna()
-    for d in [m1, m5]:
-        if isinstance(d.columns, pd.MultiIndex): d.columns = d.columns.get_level_values(0)
-    return m1, m5
+# --- IDŐZÓNÁK KEZELÉSE ---
+def get_times():
+    tz_hu = pytz.timezone('Europe/Budapest')
+    tz_ny = pytz.timezone('America/New_York')
+    now_hu = datetime.now(tz_hu).strftime("%H:%M:%S")
+    now_ny = datetime.now(tz_ny).strftime("%H:%M:%S")
+    return now_hu, now_ny
 
-def calc_indicators(df):
-    df['SMA'] = df['Close'].rolling(20).mean()
-    df['Upper'] = df['SMA'] + (df['Close'].rolling(20).std() * 2.1)
-    df['Lower'] = df['SMA'] - (df['Close'].rolling(20).std() * 2.1)
+# --- OPTIMALIZÁLT ADATGYŰJTÉS ---
+@st.cache_data(ttl=60)
+def get_hybrid_data():
+    # Január óta tartó trend (1h felbontás)
+    df_jan = yf.download("BZ=F", start="2026-01-01", interval="1h").dropna()
+    # Utolsó 7 nap (1m felbontás - precíziós)
+    df_1m = yf.download("BZ=F", period="7d", interval="1m").dropna()
+    
+    for d in [df_jan, df_1m]:
+        if isinstance(d.columns, pd.MultiIndex): d.columns = d.columns.get_level_values(0)
+    return df_jan, df_1m
+
+def apply_indicators(df, is_minute=False):
+    # Rövidebb ablak a perces adatokhoz (gyorsabb reakció)
+    window = 14 if is_minute else 20
+    df['SMA'] = df['Close'].rolling(window).mean()
+    df['Upper'] = df['SMA'] + (df['Close'].rolling(window).std() * 2.1)
+    df['Lower'] = df['SMA'] - (df['Close'].rolling(window).std() * 2.1)
+    # RSI
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     df['RSI'] = 100 - (100 / (1 + (gain/loss)))
+    # Trend szűrő (50-es EMA)
     df['EMA_Trend'] = df['Close'].ewm(span=50).mean()
     return df.dropna()
 
 try:
-    df1, df5 = get_market_data()
-    df1, df5 = calc_indicators(df1), calc_indicators(df5)
+    df_j, df_m = get_hybrid_data()
+    df_j = apply_indicators(df_j, is_minute=False)
+    df_m = apply_indicators(df_m, is_minute=True)
     
-    latest1 = df1.iloc[-1]
-    latest5 = df5.iloc[-1]
+    t_hu, t_ny = get_times()
+    latest_m = df_m.iloc[-1]
+    latest_j = df_j.iloc[-1]
     
-    # Döntési logika
+    # --- FEJLÉC IDŐKKEL ---
+    st.title("🏦 BRENT GLOBAL ALPHA TERMINAL")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("BUDAPEST (CET)", t_hu)
+    c2.metric("NEW YORK (EST)", t_ny)
+    c3.metric("BRENT ÁR", f"${latest_m['Close']:.2f}")
+    c4.metric("RSI (1m)", f"{latest_m['RSI']:.1f}")
+    c5.metric("JAN TREND", "BULLISH" if latest_j['Close'] > latest_j['EMA_Trend'] else "BEARISH")
+
+    # --- HIBRID DÖNTÉSI LOGIKA ---
     score = 0
     reasons = []
-    if latest1['Close'] > latest1['Upper']: score += 2; reasons.append("1m Bollinger Kitörés")
-    if latest1['RSI'] < 30: score += 1; reasons.append("1m RSI Túladott")
-    if latest1['Close'] > latest1['EMA_Trend']: score += 1; reasons.append("1m Emelkedő Trend")
-    if latest5['Close'] > latest5['EMA_Trend']: score += 2; reasons.append("5m Trend Megerősítés")
-    if latest1['Close'] < latest1['Lower']: score -= 2; reasons.append("1m Letörés")
-    if latest1['RSI'] > 70: score -= 1; reasons.append("1m RSI Túlvett")
-
-    # --- FEJLÉC ---
-    st.title("🏦 BRENT ELITE TERMINAL")
     
-    c1, c2, c3, c4 = st.columns(4)
-    price = latest1['Close']
-    c1.metric("BRENT ÁR", f"${price:.2f}")
-    c2.metric("RSI (1m)", f"{latest1['RSI']:.1f}")
-    c3.metric("5m TREND", "LONG" if latest5['Close'] > latest5['EMA_Trend'] else "SHORT")
-    c4.metric("FRISSÍTÉS", datetime.now().strftime("%H:%M:%S"))
-
-    # --- JAVÍTOTT NAGY SZIGNÁL PANEL (FEHÉR SZÖVEGGEL) ---
-    if score >= 3:
-        status, color = "ERŐS VÉTEL (LONG) 🚀", "#2ecc71" # Zöld
-    elif score <= -2:
-        status, color = "ERŐS ELADÁS (SHORT) 📉", "#e74c3c" # Piros
+    # Perces szignálok (Agresszív)
+    if latest_m['Close'] > latest_m['Upper']: score += 2; reasons.append("1m Breakout")
+    if latest_m['RSI'] < 30: score += 1; reasons.append("1m Oversold")
+    
+    # Január óta tartó trend megerősítése (Biztonsági szűrő)
+    if latest_j['Close'] > latest_j['EMA_Trend']:
+        score += 1; reasons.append("Jan Trend Alignment")
     else:
-        status, color = "VÁRAKOZÁS ⚖️", "#95a5a6" # Szürke
+        score -= 1 # Levonunk, ha szembe megy a fő trenddel
+
+    # --- SZIGNÁL PANEL ---
+    if score >= 3:
+        status, color = "ERŐS VÉTEL (LONG) 🚀", "#2ecc71"
+    elif score <= -2:
+        status, color = "ERŐS ELADÁS (SHORT) 📉", "#e74c3c"
+    else:
+        status, color = "VÁRAKOZÁS / SEMLEGES ⚖️", "#95a5a6"
 
     st.markdown(f"""
-        <div class="signal-box" style="background-color: {color}; border-color: #ffffff;">
+        <div class="signal-box" style="background-color: {color};">
             <div class="signal-title">{status}</div>
-            <div class="signal-reason"><b>Indoklás:</b> {' + '.join(reasons) if reasons else 'Piaci zaj / Nincs irány'}</div>
+            <div class="signal-reason"><b>Hibrid Indoklás:</b> {' + '.join(reasons) if reasons else 'Konszolidáció'}</div>
         </div>
     """, unsafe_allow_html=True)
 
-    # --- GRAFIKON ---
+    # --- GRAFIKON (PERCES PRECÍZITÁS) ---
+    st.subheader("📊 Élő Perces Monitor (Hibrid Súlyozással)")
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df1.index[-100:], y=df1['Close'].iloc[-100:], name="Ár", line=dict(color="#00ffcc", width=3)))
-    fig.add_trace(go.Scatter(x=df1.index[-100:], y=df1['Upper'].iloc[-100:], name="Felső", line=dict(color="#ffffff", dash="dot", opacity=0.3)))
-    fig.add_trace(go.Scatter(x=df1.index[-100:], y=df1['Lower'].iloc[-100:], name="Alsó", line=dict(color="#ffffff", dash="dot", opacity=0.3)))
-    fig.update_layout(template="plotly_dark", height=450, plot_bgcolor='#0e1117', paper_bgcolor='#0e1117')
+    fig.add_trace(go.Scatter(x=df_m.index[-120:], y=df_m['Close'].iloc[-120:], name="Ár", line=dict(color="#00ffcc", width=3)))
+    fig.add_trace(go.Scatter(x=df_m.index[-120:], y=df_m['Upper'].iloc[-120:], name="Felső", line=dict(color="#ffffff", dash="dot", opacity=0.3)))
+    fig.add_trace(go.Scatter(x=df_m.index[-120:], y=df_m['Lower'].iloc[-120:], name="Alsó", line=dict(color="#ffffff", dash="dot", opacity=0.3)))
+    fig.update_layout(template="plotly_dark", height=450, paper_bgcolor='#0e1117', plot_bgcolor='#0e1117', margin=dict(l=0,r=0,t=0,b=0))
     st.plotly_chart(fig, use_container_width=True)
 
-except Exception as e:
-    st.info("Várakozás a vasárnap éjféli nyitásra. Az adatok ekkor frissülnek élőben.")
+    # TELEGRAM SIDEBAR
+    with st.sidebar:
+        st.header("🤖 Robot Status")
+        if st.toggle("Élesítés (Hibrid Optimalizált)"):
+            st.success("Robot aktív: 1m precizitás + Jan trendszűrő")
 
+except Exception as e:
+    st.info(f"Várakozás a vasárnap éjféli nyitásra. (Hiba: {e})")
