@@ -1,115 +1,87 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import pandas_ta as ta
 import yfinance as yf
-from datetime import datetime
+import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression
 
-st.set_page_config(page_title="Brent Olaj Dashboard", layout="wide")
-st.title("Brent olaj ár és jelzések")
+st.set_page_config(page_title="Brent Dashboard", layout="wide")
 
-# ---- Adatlekérés (Yahoo Finance) ----
-@st.cache_data(ttl=300)
-def get_brent_data():
-    try:
-        data = yf.download("BZ=F", period="6mo", interval="1d")
-        data = data.reset_index()
-        data = data[['Date', 'Close']]
-        data.columns = ['date', 'price']
-        return data
-    except Exception as e:
-        st.error(f"Hiba az adatlekérésnél: {e}")
-        return pd.DataFrame({'date':[], 'price':[]})
+st.title("Brent olaj dashboard")
 
-df = get_brent_data()
+# --- ADAT LETÖLTÉS ---
+@st.cache_data
+def load_data():
+    df = yf.download("BZ=F", period="6mo", interval="1d")
+    df = df.dropna()
+    return df
 
-if df.empty:
-    st.error("Nincs adat.")
-    st.stop()
+df = load_data()
 
-# ---- Indikátorok ----
-df['RSI'] = ta.rsi(df['price'], length=14)
+# --- INDIKÁTOROK ---
+def add_indicators(df):
+    df["SMA_20"] = df["Close"].rolling(window=20).mean()
+    df["EMA_20"] = df["Close"].ewm(span=20, adjust=False).mean()
 
-macd = ta.macd(df['price'])
-df['MACD'] = macd['MACD_12_26_9']
+    # RSI számítás
+    delta = df["Close"].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df["RSI"] = 100 - (100 / (1 + rs))
 
-bb = ta.bbands(df['price'])
-df['BB_upper'] = bb['BBU_20_2.0']
-df['BB_lower'] = bb['BBL_20_2.0']
+    return df
 
-# ---- Grafikon ----
-fig, ax = plt.subplots(figsize=(10,4))
-ax.plot(df['date'], df['price'], label='Ár', color='blue')
+df = add_indicators(df)
 
-# Buy/Sell pontok
-buy = df[(df['RSI'] < 30) | (df['price'] < df['BB_lower'])]
-sell = df[(df['RSI'] > 70) | (df['price'] > df['BB_upper'])]
+# --- GRAFIKON ---
+st.subheader("Árfolyam + indikátorok")
 
-ax.scatter(buy['date'], buy['price'], color='green', label='Buy', marker='^')
-ax.scatter(sell['date'], sell['price'], color='red', label='Sell', marker='v')
+fig, ax = plt.subplots(figsize=(10, 5))
+
+ax.plot(df.index, df["Close"], label="Ár")
+ax.plot(df.index, df["SMA_20"], label="SMA 20")
+ax.plot(df.index, df["EMA_20"], label="EMA 20")
 
 ax.legend()
-ax.set_title("Brent ár és jelzések")
 st.pyplot(fig)
 
-# ---- Jelzések ----
-st.subheader("Jelzések")
+# --- RSI ---
+st.subheader("RSI")
 
-rsi_signal = "Hold"
-if df['RSI'].iloc[-1] < 30:
-    rsi_signal = "Buy"
-elif df['RSI'].iloc[-1] > 70:
-    rsi_signal = "Sell"
+fig2, ax2 = plt.subplots(figsize=(10, 3))
+ax2.plot(df.index, df["RSI"], label="RSI")
+ax2.axhline(70, linestyle="--")
+ax2.axhline(30, linestyle="--")
+ax2.legend()
 
-macd_signal = "Hold"
-if df['MACD'].iloc[-1] > 0:
-    macd_signal = "Buy"
-elif df['MACD'].iloc[-1] < 0:
-    macd_signal = "Sell"
+st.pyplot(fig2)
 
-bb_signal = "Hold"
-if df['price'].iloc[-1] < df['BB_lower'].iloc[-1]:
-    bb_signal = "Buy"
-elif df['price'].iloc[-1] > df['BB_upper'].iloc[-1]:
-    bb_signal = "Sell"
-
-signals = [rsi_signal, macd_signal, bb_signal]
-
-buy_count = signals.count("Buy")
-sell_count = signals.count("Sell")
-
-overall = "Hold"
-if buy_count > sell_count:
-    overall = "Buy"
-elif sell_count > buy_count:
-    overall = "Sell"
-
-st.write(f"RSI: {rsi_signal}")
-st.write(f"MACD: {macd_signal}")
-st.write(f"Bollinger: {bb_signal}")
-st.write(f"Összesített jelzés: {overall}")
-
-# ---- Egyszerű előrejelzés (trend alapú) ----
+# --- ELŐREJELZÉS (egyszerű) ---
 st.subheader("Egyszerű előrejelzés")
 
-last_prices = df['price'].tail(5)
-trend = np.polyfit(range(len(last_prices)), last_prices, 1)[0]
+df_pred = df.copy()
+df_pred["t"] = np.arange(len(df_pred))
 
-future = []
-last_price = df['price'].iloc[-1]
+X = df_pred[["t"]]
+y = df_pred["Close"]
 
-for i in range(7):
-    last_price += trend
-    future.append(last_price)
+model = LinearRegression()
+model.fit(X, y)
 
-future_dates = pd.date_range(df['date'].iloc[-1], periods=8)[1:]
+future_days = 5
+future_t = np.arange(len(df_pred), len(df_pred) + future_days).reshape(-1, 1)
+predictions = model.predict(future_t)
 
-forecast_df = pd.DataFrame({
-    'date': future_dates,
-    'forecast': future
-})
+future_dates = pd.date_range(start=df.index[-1], periods=future_days + 1)[1:]
 
-st.line_chart(forecast_df.set_index('date'))
+fig3, ax3 = plt.subplots(figsize=(10, 5))
+ax3.plot(df.index, df["Close"], label="Valós ár")
+ax3.plot(future_dates, predictions, label="Előrejelzés")
 
-st.success(f"Frissítve: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+ax3.legend()
+st.pyplot(fig3)
+
+# --- INFO ---
+st.subheader("Utolsó ár")
+st.write(df["Close"].iloc[-1])
