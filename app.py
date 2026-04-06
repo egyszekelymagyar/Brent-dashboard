@@ -9,7 +9,7 @@ import time
 from sklearn.ensemble import RandomForestRegressor
 
 # =================================================================
-# 1. KONFIGURÁCIÓ ÉS ÁLLANDÓ MEMÓRIA
+# 1. KONFIGURÁCIÓ ÉS ÁLLANDÓ MEMÓRIA (TÖRVÉNY: MINDEN MEGŐRIZVE)
 # =================================================================
 st.set_page_config(page_title="BRENT AI - PERMANENT TRADER", layout="wide", page_icon="🏦")
 
@@ -33,7 +33,7 @@ st.markdown("""
     .stat-value { color: #00ffcc; font-size: 18px; font-weight: 900; display: block; }
     .wallet-header { background: linear-gradient(90deg, #161b22, #232d39); border: 2px solid #f1c40f; padding: 15px; border-radius: 15px; text-align: center; margin-bottom: 10px; }
     
-    /* 2X NAGYOBB AI SZAKASZ */
+    /* 2X NAGYOBB AI SZAKASZ ÉS KAPCSOLÓ */
     .ai-section { background-color: #1a1c24; padding: 40px; border-radius: 25px; border: 4px solid #00d4ff; margin-bottom: 25px; text-align: center; }
     .stToggle > div { transform: scale(2.5); margin: 35px 0; }
     
@@ -43,7 +43,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # =================================================================
-# 2. ADAT ÉS ML MOTOR (HIBAJAVÍTÁSSAL)
+# 2. ADAT ÉS ML MOTOR (HIBAJAVÍTOTT VERZIÓ)
 # =================================================================
 @st.cache_data(ttl=30)
 def load_market_data():
@@ -56,15 +56,14 @@ def load_market_data():
     except: return None
 
 def get_ai_prediction(df):
-    if len(df) < 10: return df['Close'].iloc[-1]
+    if len(df) < 10: return float(df['Close'].iloc[-1])
     data = df.tail(150).copy()
     data['Target'] = data['Close'].shift(-1)
     data = data.dropna()
     X, y = data[['Open', 'High', 'Low', 'Close']].values, data['Target'].values
     model = RandomForestRegressor(n_estimators=100, random_state=42).fit(X[:-1], y[:-1])
-    # HIBAJAVÍTÁS: [0] index hozzáadása a tömbhöz
     prediction = model.predict(X[-1].reshape(1, -1))
-    return float(prediction[0])
+    return float(prediction[0]) # Biztos float kimenet
 
 # =================================================================
 # 3. KERESKEDÉSI FUNKCIÓK
@@ -83,10 +82,7 @@ def manage_trade(action, side, price, risk=75):
             if t['side'] == "SHORT": pnl_pct *= -1
             profit = t['amt'] * pnl_pct
             st.session_state.wallet += profit
-            
-            # Kilépési pont elmentése grafikonhoz
             st.session_state.last_exit = {'time': datetime.now(), 'price': price}
-            
             st.session_state.history.append({
                 'Idő': datetime.now().strftime("%H:%M"),
                 'Típus': t['side'],
@@ -104,13 +100,15 @@ if df is not None:
     curr_p = df['Close'].iloc[-1]
     pred_p = get_ai_prediction(df)
     diff = pred_p - curr_p
+    
+    # SZÁZALÉKOK ÚJRA SZÁMÍTVA
     buy_pct = 100 if pred_p > curr_p else 0
     sell_pct = 100 - buy_pct
 
-    # EGYENLEG KIJELZŐ
+    # FEJLÉC
     st.markdown(f"""<div class="wallet-header"><h3 style="color:#f1c40f;margin:0;">VIRTUÁLIS EGYENLEG</h3><h1 style="color:white;margin:0;">{st.session_state.wallet:,.0f} Ft</h1></div>""", unsafe_allow_html=True)
     
-    # 2X NAGYOBB AI SZAKASZ ÉS KAPCSOLÓ
+    # AI SZAKASZ (2X MÉRET)
     st.markdown('<div class="ai-section">', unsafe_allow_html=True)
     st.markdown(f"<h2 style='color:#00d4ff;'>🤖 ROBOT AI RENDELKEZÉS: {'AKTÍV' if st.session_state.ai_broker else 'KIKAPCSOLVA'}</h2>", unsafe_allow_html=True)
     st.session_state.ai_broker = st.toggle("KIKAPCSOLVA (BALRA) <---> BEKAPCSOLVA (JOBBRA)", value=st.session_state.ai_broker)
@@ -124,7 +122,7 @@ if df is not None:
         if st.button("❌ ZÁRÁS", use_container_width=True): manage_trade("CLOSE", None, curr_p)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # 2x3 RÁCS
+    # 2x3 RÁCS IDŐZÓNÁKKAL ÉS SZÁZALÉKOKKAL
     t_hu = datetime.now(pytz.timezone('Europe/Budapest')).strftime("%H:%M:%S")
     t_ny = datetime.now(pytz.timezone('America/New_York')).strftime("%H:%M:%S")
     st.markdown(f"""<div class="mobile-grid">
@@ -136,35 +134,36 @@ if df is not None:
         <div class="stat-card"><span class="stat-label">Eladás %</span><span class="stat-value">{sell_pct}%</span></div>
     </div>""", unsafe_allow_html=True)
 
-    # SZIGNÁL
+    # SZIGNÁL PANEL SZÁZALÉKKAL
     color = "#2ecc71" if buy_pct > 50 else "#e74c3c"
-    st.markdown(f"""<div class="signal-box" style="background-color: {color};"><div class="signal-title">{"VÉTEL! 🚀" if buy_pct > 50 else "ELADÁS! 📉"}</div></div>""", unsafe_allow_html=True)
+    pct_val = buy_pct if buy_pct > 50 else sell_pct
+    st.markdown(f"""<div class="signal-box" style="background-color: {color};">
+        <div class="signal-title">{"VÉTEL! 🚀" if buy_pct > 50 else "ELADÁS! 📉"}</div>
+        <div style="font-size: 22px; color: white; font-weight: 800; margin-top: 10px;">Biztonsági szint: {pct_val}%</div>
+    </div>""", unsafe_allow_html=True)
 
-    # GRAFIKON (BELÉPÉS, TARTÁS, KILÉPÉS)
+    # GRAFIKON: BELÉPÉS, TARTÁS, KILÉPÉS
     fig = go.Figure()
     p_df = df.tail(80)
-    fig.add_trace(go.Scatter(x=p_df.index, y=p_df['Close'], name="Brent Árfolyam", line=dict(color='rgba(255,255,255,0.4)', width=2)))
+    fig.add_trace(go.Scatter(x=p_df.index, y=p_df['Close'], name="Árfolyam", line=dict(color='rgba(255,255,255,0.4)', width=2)))
 
-    # Aktív kereskedés rajzolása
     if st.session_state.active_trade:
         t = st.session_state.active_trade
         scol = "#2ecc71" if t['side'] == "LONG" else "#e74c3c"
         mask = p_df.index >= t['time']
         segment = p_df[mask]
         
-        # 1. TARTÁS VONALA (Vastagított rész)
         if not segment.empty:
-            fig.add_trace(go.Scatter(x=segment.index, y=segment['Close'], line=dict(color=scol, width=8), name="AKTÍV TARTÁS"))
-        
-        # 2. BELÉPÉSI PONT
-        fig.add_trace(go.Scatter(x=[p_df.index[p_df.index >= t['time']][0] if any(p_df.index >= t['time']) else p_df.index[-1]], 
-                                 y=[t['entry']], mode='markers', marker=dict(color='yellow', size=15, symbol='star'), name="BELÉPÉS"))
+            fig.add_trace(go.Scatter(x=segment.index, y=segment['Close'], line=dict(color=scol, width=8), name="TARTÁS"))
+            fig.add_trace(go.Scatter(x=[segment.index[0]], y=[t['entry']], mode='markers', 
+                                   marker=dict(color='yellow', size=18, symbol='star'), name="BELÉPÉS"))
         fig.add_hline(y=t['entry'], line_dash="dash", line_color="yellow")
 
-    # 3. KILÉPÉSI PONT (Utolsó lezárt)
     if st.session_state.last_exit:
         le = st.session_state.last_exit
-        fig.add_trace(go.Scatter(x=[p_df.index[-1]], y=[le['price']], mode='markers', marker=dict(color='white', size=12, symbol='x'), name="UTOLSÓ KILÉPÉS"))
+        if le['time'] in p_df.index:
+            fig.add_trace(go.Scatter(x=[le['time']], y=[le['price']], mode='markers', 
+                                   marker=dict(color='white', size=12, symbol='x'), name="KILÉPÉS"))
 
     fig.update_layout(template="plotly_dark", height=500, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
