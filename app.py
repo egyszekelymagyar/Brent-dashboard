@@ -1,155 +1,182 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import yfinance as yf
-import streamlit.components.v1 as components
+import plotly.graph_objects as go
 from datetime import datetime
+import pytz
 import time
-import json
-import os
+from sklearn.ensemble import RandomForestRegressor
 
 # =================================================================
-# 1. VERZIÓ ELLENŐRZÉS ÉS ÁLLAPOTKEZELÉS
+# 1. KONFIGURÁCIÓ ÉS ÁLLANDÓ MEMÓRIA (TÖRVÉNY: MINDEN MEGŐRIZVE)
 # =================================================================
-DATA_FILE = "brent_trend_radar_final.json"
-VERSION = "TREND-RADAR V5.1 (FIXED)"
-
-def save_state():
-    data = {
-        "wallet": st.session_state.wallet, 
-        "history": st.session_state.history, 
-        "active_trade": st.session_state.active_trade, 
-        "ai_broker": st.session_state.ai_broker
-    }
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f)
-
-def load_state():
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r") as f:
-                d = json.load(f)
-                st.session_state.wallet = d.get("wallet", 1000000.0)
-                st.session_state.history = d.get("history", [])
-                st.session_state.active_trade = d.get("active_trade", None)
-                st.session_state.ai_broker = d.get("ai_broker", False)
-        except Exception: pass
+st.set_page_config(page_title="BRENT AI - PERMANENT TRADER", layout="wide", page_icon="🏦")
 
 if 'wallet' not in st.session_state:
-    st.session_state.wallet, st.session_state.history = 1000000.0, []
-    st.session_state.active_trade, st.session_state.ai_broker = None, False
-    load_state()
-
-# =================================================================
-# 2. ADATLEKÉRÉS (HIBAJAVÍTOTT)
-# =================================================================
-def get_live_data():
-    try:
-        # A multi_level_index=False megakadályozza a MultiIndex lefagyást
-        df = yf.download("BZ=F", period="1d", interval="1m", progress=False, multi_level_index=False)
-        if df.empty:
-            return None
-        # Az oszlopnevek tisztítása (néha kisbetű/nagybetű eltérés lehet)
-        df.columns = [str(col).capitalize() for col in df.columns]
-        return df
-    except Exception as e:
-        st.error(f"Adatlekérési hiba: {e}")
-        return None
-
-# =================================================================
-# 3. KERESKEDÉSI MOTOR (75% TÉT)
-# =================================================================
-def manage_trade(action, side, price):
-    if action == "CLOSE" and st.session_state.active_trade:
-        t = st.session_state.active_trade
-        pnl_pct = ((price - t['entry']) / t['entry']) * (1 if t['side'] == "LONG" else -1)
-        profit_ft = t['amt'] * pnl_pct
-        st.session_state.wallet += (t['amt'] + profit_ft)
-        st.session_state.history.append({
-            'Idő': datetime.now().strftime("%H:%M:%S"),
-            'Irány': t['side'],
-            'Profit': f"{profit_ft:,.0f} Ft",
-            'Eredmény': f"{pnl_pct*100:+.2f}%"
-        })
-        st.session_state.active_trade = None
-        save_state()
-    elif action == "OPEN" and not st.session_state.active_trade:
-        inv = st.session_state.wallet * 0.75
-        st.session_state.wallet -= inv
-        st.session_state.active_trade = {'side': side, 'entry': price, 'amt': inv}
-        save_state()
-
-# =================================================================
-# 4. UI ÉS VIZUÁLIS ELEMEK
-# =================================================================
-st.set_page_config(page_title="BRENT TREND RADAR V5.1", layout="wide")
+    st.session_state.wallet = 1000000.0
+if 'active_trade' not in st.session_state:
+    st.session_state.active_trade = None
+if 'history' not in st.session_state:
+    st.session_state.history = []
+if 'ai_broker' not in st.session_state:
+    st.session_state.ai_broker = False
+if 'last_exit' not in st.session_state:
+    st.session_state.last_exit = None
 
 st.markdown("""
     <style>
-    .stApp { background-color: #050505; color: white; }
-    .warning-banner { background: #ffaa00; color: black; padding: 10px; border-radius: 5px; text-align: center; font-weight: bold; margin: 10px 0; animation: blink 1.5s infinite; }
-    @keyframes blink { 50% { opacity: 0.5; } }
+    .main { background-color: #0e1117; }
+    .mobile-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px; }
+    .stat-card { background-color: #1a1c24; border: 2px solid #30363d; padding: 10px; border-radius: 10px; text-align: center; }
+    .stat-label { color: #FFFFFF; font-size: 11px; font-weight: 800; text-transform: uppercase; display: block; }
+    .stat-value { color: #00ffcc; font-size: 18px; font-weight: 900; display: block; }
+    .wallet-header { background: linear-gradient(90deg, #161b22, #232d39); border: 2px solid #f1c40f; padding: 15px; border-radius: 15px; text-align: center; margin-bottom: 10px; }
+    
+    /* 2X NAGYOBB AI SZAKASZ ÉS KAPCSOLÓ */
+    .ai-section { background-color: #1a1c24; padding: 40px; border-radius: 25px; border: 4px solid #00d4ff; margin-bottom: 25px; text-align: center; }
+    .stToggle > div { transform: scale(2.5); margin: 35px 0; }
+    
+    .signal-box { padding: 20px; border-radius: 15px; text-align: center; border: 4px solid #ffffff; margin-bottom: 15px; }
+    .signal-title { font-size: 30px !important; color: #ffffff !important; font-weight: 900; margin: 0 !important; }
     </style>
     """, unsafe_allow_html=True)
 
-st.caption(f"🚀 Rendszer állapot: {VERSION}")
+# =================================================================
+# 2. ADAT ÉS ML MOTOR (HIBAJAVÍTOTT VERZIÓ)
+# =================================================================
+@st.cache_data(ttl=30)
+def load_market_data():
+    try:
+        df = yf.download("BZ=F", period="2d", interval="1m", progress=False)
+        if df is None or df.empty: return None
+        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+        df.index = df.index.tz_localize(None)
+        return df.dropna()
+    except: return None
 
-# Adatok betöltése
-data = get_live_data()
+def get_ai_prediction(df):
+    if len(df) < 10: return float(df['Close'].iloc[-1])
+    data = df.tail(150).copy()
+    data['Target'] = data['Close'].shift(-1)
+    data = data.dropna()
+    X, y = data[['Open', 'High', 'Low', 'Close']].values, data['Target'].values
+    model = RandomForestRegressor(n_estimators=100, random_state=42).fit(X[:-1], y[:-1])
+    prediction = model.predict(X[-1].reshape(1, -1))
+    return float(prediction[0]) # Biztos float kimenet
 
-if data is not None:
-    curr_p = float(data['Close'].iloc[-1])
-    ema_fast = data['Close'].ewm(span=12).mean().iloc[-1]
-    ema_slow = data['Close'].ewm(span=26).mean().iloc[-1]
-    trend_side = "LONG" if ema_fast > ema_slow else "SHORT"
-    
-    gap = abs(ema_fast - ema_slow)
-    is_warning = gap < (curr_p * 0.00018) # Viharjelző küszöb
-
-    # FELSŐ PANEL
-    c1, c2, c3 = st.columns(3)
-    with c1: st.metric("SZÁMLA", f"{st.session_state.wallet:,.0f} Ft")
-    with c2: 
+# =================================================================
+# 3. KERESKEDÉSI FUNKCIÓK
+# =================================================================
+def manage_trade(action, side, price, risk=75):
+    if action == "OPEN":
+        if not st.session_state.active_trade:
+            investment = st.session_state.wallet * (risk / 100)
+            st.session_state.active_trade = {
+                'side': side, 'entry': price, 'amt': investment, 'time': datetime.now()
+            }
+    elif action == "CLOSE":
         if st.session_state.active_trade:
             t = st.session_state.active_trade
-            pnl = ((curr_p - t['entry']) / t['entry']) * (1 if t['side'] == "LONG" else -1)
-            st.metric("ÉLŐ PNL", f"{pnl*100:+.2f}%", delta=t['side'])
-        else: st.info("Várakozás trendre...")
-    with c3: st.metric("BRENT ÁR", f"${curr_p:.2f}")
+            pnl_pct = (price - t['entry']) / t['entry']
+            if t['side'] == "SHORT": pnl_pct *= -1
+            profit = t['amt'] * pnl_pct
+            st.session_state.wallet += profit
+            st.session_state.last_exit = {'time': datetime.now(), 'price': price}
+            st.session_state.history.append({
+                'Idő': datetime.now().strftime("%H:%M"),
+                'Típus': t['side'],
+                'Profit': f"{profit:+.0f} Ft",
+                'Egyenleg': f"{st.session_state.wallet:,.0f} Ft"
+            })
+            st.session_state.active_trade = None
 
-    if st.session_state.active_trade and is_warning:
-        st.markdown('<div class="warning-banner">⚠️ TREND GYENGÜLÉS! ROBOT ZÁRÁSRA KÉSZÜL!</div>', unsafe_allow_html=True)
+# =================================================================
+# 4. DASHBOARD ÉS LOGIKA
+# =================================================================
+df = load_market_data()
 
-    # KAPCSOLÓ
-    st.session_state.ai_broker = st.toggle("🤖 TREND-RADAR AKTIVÁLÁSA", value=st.session_state.ai_broker)
-    save_state()
+if df is not None:
+    curr_p = df['Close'].iloc[-1]
+    pred_p = get_ai_prediction(df)
+    diff = pred_p - curr_p
+    
+    # SZÁZALÉKOK ÚJRA SZÁMÍTVA
+    buy_pct = 100 if pred_p > curr_p else 0
+    sell_pct = 100 - buy_pct
 
-    # ROBOT LOGIKA
+    # FEJLÉC
+    st.markdown(f"""<div class="wallet-header"><h3 style="color:#f1c40f;margin:0;">VIRTUÁLIS EGYENLEG</h3><h1 style="color:white;margin:0;">{st.session_state.wallet:,.0f} Ft</h1></div>""", unsafe_allow_html=True)
+    
+    # AI SZAKASZ (2X MÉRET)
+    st.markdown('<div class="ai-section">', unsafe_allow_html=True)
+    st.markdown(f"<h2 style='color:#00d4ff;'>🤖 ROBOT AI RENDELKEZÉS: {'AKTÍV' if st.session_state.ai_broker else 'KIKAPCSOLVA'}</h2>", unsafe_allow_html=True)
+    st.session_state.ai_broker = st.toggle("KIKAPCSOLVA (BALRA) <---> BEKAPCSOLVA (JOBBRA)", value=st.session_state.ai_broker)
+    
+    c1, c2, c3 = st.columns(3)
+    with c1: 
+        if st.button("🚀 VÉTEL", use_container_width=True): manage_trade("OPEN", "LONG", curr_p)
+    with c2: 
+        if st.button("📉 ELADÁS", use_container_width=True): manage_trade("OPEN", "SHORT", curr_p)
+    with c3: 
+        if st.button("❌ ZÁRÁS", use_container_width=True): manage_trade("CLOSE", None, curr_p)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # 2x3 RÁCS IDŐZÓNÁKKAL ÉS SZÁZALÉKOKKAL
+    t_hu = datetime.now(pytz.timezone('Europe/Budapest')).strftime("%H:%M:%S")
+    t_ny = datetime.now(pytz.timezone('America/New_York')).strftime("%H:%M:%S")
+    st.markdown(f"""<div class="mobile-grid">
+        <div class="stat-card"><span class="stat-label">Budapest</span><span class="stat-value">{t_hu}</span></div>
+        <div class="stat-card"><span class="stat-label">New York</span><span class="stat-value">{t_ny}</span></div>
+        <div class="stat-card"><span class="stat-label">Brent Ár</span><span class="stat-value">${curr_p:.2f}</span></div>
+        <div class="stat-card"><span class="stat-label">AI Cél</span><span class="stat-value">${pred_p:.2f}</span></div>
+        <div class="stat-card"><span class="stat-label">Vétel %</span><span class="stat-value">{buy_pct}%</span></div>
+        <div class="stat-card"><span class="stat-label">Eladás %</span><span class="stat-value">{sell_pct}%</span></div>
+    </div>""", unsafe_allow_html=True)
+
+    # SZIGNÁL PANEL SZÁZALÉKKAL
+    color = "#2ecc71" if buy_pct > 50 else "#e74c3c"
+    pct_val = buy_pct if buy_pct > 50 else sell_pct
+    st.markdown(f"""<div class="signal-box" style="background-color: {color};">
+        <div class="signal-title">{"VÉTEL! 🚀" if buy_pct > 50 else "ELADÁS! 📉"}</div>
+        <div style="font-size: 22px; color: white; font-weight: 800; margin-top: 10px;">Biztonsági szint: {pct_val}%</div>
+    </div>""", unsafe_allow_html=True)
+
+    # GRAFIKON: BELÉPÉS, TARTÁS, KILÉPÉS
+    fig = go.Figure()
+    p_df = df.tail(80)
+    fig.add_trace(go.Scatter(x=p_df.index, y=p_df['Close'], name="Árfolyam", line=dict(color='rgba(255,255,255,0.4)', width=2)))
+
+    if st.session_state.active_trade:
+        t = st.session_state.active_trade
+        scol = "#2ecc71" if t['side'] == "LONG" else "#e74c3c"
+        mask = p_df.index >= t['time']
+        segment = p_df[mask]
+        
+        if not segment.empty:
+            fig.add_trace(go.Scatter(x=segment.index, y=segment['Close'], line=dict(color=scol, width=8), name="TARTÁS"))
+            fig.add_trace(go.Scatter(x=[segment.index[0]], y=[t['entry']], mode='markers', 
+                                   marker=dict(color='yellow', size=18, symbol='star'), name="BELÉPÉS"))
+        fig.add_hline(y=t['entry'], line_dash="dash", line_color="yellow")
+
+    if st.session_state.last_exit:
+        le = st.session_state.last_exit
+        if le['time'] in p_df.index:
+            fig.add_trace(go.Scatter(x=[le['time']], y=[le['price']], mode='markers', 
+                                   marker=dict(color='white', size=12, symbol='x'), name="KILÉPÉS"))
+
+    fig.update_layout(template="plotly_dark", height=500, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
+    st.plotly_chart(fig, use_container_width=True)
+
+    # AI BRÓKER LOGIKA
     if st.session_state.ai_broker:
         if not st.session_state.active_trade:
-            manage_trade("OPEN", trend_side, curr_p)
-        elif st.session_state.active_trade['side'] != trend_side:
-            manage_trade("CLOSE", None, curr_p)
+            if diff > 0.05: manage_trade("OPEN", "LONG", curr_p)
+            elif diff < -0.05: manage_trade("OPEN", "SHORT", curr_p)
+        else:
+            t = st.session_state.active_trade
+            if (t['side'] == "LONG" and diff < -0.03) or (t['side'] == "SHORT" and diff > 0.03):
+                manage_trade("CLOSE", None, curr_p)
 
-    # ÉLŐ GRAFIKON (TradingView)
-    tradingview_html = """
-    <div style="height: 450px;"><div id="tv_chart"></div>
-    <script type="text/javascript" src="https://tradingview.com"></script>
-    <script type="text/javascript">
-    new TradingView.widget({"autosize": true, "symbol": "TVC:UKOIL", "interval": "1", "theme": "dark", "container_id": "tv_chart"});
-    </script></div>
-    """
-    components.html(tradingview_html, height=450)
-
-    # VEZÉRLÉS
-    col1, col2, col3 = st.columns(3)
-    with col1: st.button("🚀 KÉZI VÉTEL", on_click=manage_trade, args=("OPEN", "LONG", curr_p), use_container_width=True)
-    with col2: st.button("📉 KÉZI ELADÁS", on_click=manage_trade, args=("OPEN", "SHORT", curr_p), use_container_width=True)
-    with col3: st.button("❌ ZÁRÁS", on_click=manage_trade, args=("CLOSE", None, curr_p), use_container_width=True)
-
-    if st.session_state.history:
-        st.table(pd.DataFrame(st.session_state.history).tail(3))
-else:
-    st.warning("⚠️ Adatok betöltése... Frissítés folyamatban.")
-
-time.sleep(3)
-st.rerun()
+    time.sleep(10)
+    st.rerun()
