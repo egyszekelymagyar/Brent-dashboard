@@ -1,7 +1,9 @@
 streamlit
-pandas
-numpy
 yfinance
 plotly
+feedparser
+pandas
+numpy
 scikit-learn
+pytz
 requests
