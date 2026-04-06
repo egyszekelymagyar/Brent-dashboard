@@ -12,7 +12,7 @@ from sklearn.ensemble import RandomForestRegressor
 # =================================================================
 # 1. ÁLLANDÓ MEMÓRIA
 # =================================================================
-DATA_FILE = "trading_data_v2.json"
+DATA_FILE = "trading_data_trend.json"
 
 def save_data():
     data = {
@@ -34,9 +34,9 @@ def load_data():
         except: pass
 
 # =================================================================
-# 2. KONFIGURÁCIÓ ÉS DESIGN
+# 2. KONFIGURÁCIÓ ÉS DESIGN (SZIMMETRIA FIX)
 # =================================================================
-st.set_page_config(page_title="BRENT AI - TREND TRADER", layout="wide", page_icon="🏦")
+st.set_page_config(page_title="BRENT AI - MOMENTUM TRADER", layout="wide", page_icon="🏦")
 
 if 'wallet' not in st.session_state:
     st.session_state.wallet = 1000000.0
@@ -48,15 +48,16 @@ if 'ai_broker' not in st.session_state: st.session_state.ai_broker = False
 st.markdown("""
     <style>
     .main { background-color: #0e1117; }
-    .wallet-header { background: #161b22; border: 2px solid #f1c40f; padding: 15px; border-radius: 15px; text-align: center; margin-bottom: 20px; }
-    .robot-title-box { background: #1c2128; border: 3px solid #00d4ff; border-bottom: none; padding: 10px; border-radius: 15px 15px 0 0; text-align: center; }
-    .robot-toggle-box { background: #1c2128; border: 3px solid #00d4ff; border-top: none; padding: 10px; border-radius: 0 0 15px 15px; margin-bottom: 20px; }
-    .signal-box { padding: 20px; border-radius: 15px; text-align: center; border: 3px solid #ffffff; margin-bottom: 20px; }
+    .wallet-header { background: #161b22; border: 2px solid #f1c40f; padding: 20px; border-radius: 15px; text-align: center; margin-bottom: 20px; }
+    .robot-container { background: #1c2128; border: 3px solid #00d4ff; padding: 20px; border-radius: 15px; text-align: center; margin-bottom: 20px; }
+    .signal-box { padding: 15px; border-radius: 10px; text-align: center; margin-bottom: 15px; border: 2px solid white; }
+    /* Grafikon konténer fix */
+    .plot-container { background: #161b22; border-radius: 15px; padding: 10px; }
     </style>
     """, unsafe_allow_html=True)
 
 # =================================================================
-# 3. ADAT ÉS TREND-KÖVETŐ ML MOTOR
+# 3. TREND-KÖVETŐ MOTOR (SMA + ML)
 # =================================================================
 @st.cache_data(ttl=3600)
 def load_hist():
@@ -70,17 +71,6 @@ def load_live():
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
     df.index = df.index.tz_localize(None)
     return df.dropna()
-
-def get_ai_prediction(h, l):
-    try:
-        comb = pd.concat([h.tail(50), l.tail(100)])
-        comb['Target'] = comb['Close'].shift(-1)
-        train = comb.dropna()
-        model = RandomForestRegressor(n_estimators=50, random_state=42).fit(
-            train[['Open', 'High', 'Low', 'Close']].values, train['Target'].values
-        )
-        return float(model.predict(l[['Open', 'High', 'Low', 'Close']].iloc[-1:].values)[0])
-    except: return float(l['Close'].iloc[-1])
 
 def manage_trade(action, side, price):
     if action == "OPEN" and not st.session_state.active_trade:
@@ -97,82 +87,80 @@ def manage_trade(action, side, price):
         save_data()
 
 # =================================================================
-# 4. DASHBOARD ÉS LOGIKA
+# 4. LOGIKA ÉS DASHBOARD
 # =================================================================
 h, l = load_hist(), load_live()
-# AGGRESSZÍV BELÉPÉS, DE TÜRELMESEBB KILÉPÉS (Trend tartás)
-entry_threshold = 0.003
-exit_threshold = 0.008 
 
 if not l.empty:
-    curr_p = float(l['Close'].iloc[-1])
-    pred_p = get_ai_prediction(h, l)
-    diff = pred_p - curr_p
+    # TREND SZÁMÍTÁS (Momentum alapú)
+    pdf = l.tail(100).copy()
+    curr_p = float(pdf['Close'].iloc[-1])
+    sma_short = pdf['Close'].rolling(window=10).mean().iloc[-1] # 10 perces átlag
+    sma_long = pdf['Close'].rolling(window=30).mean().iloc[-1]  # 30 perces átlag
     
-    buy_sig = diff > entry_threshold
-    sell_sig = diff < -entry_threshold
+    # Stratégia: Ha az ár az átlag felett van és emelkedik -> VÉTEL
+    # Ha az ár az átlag alatt van és esik -> ELADÁS
+    trend_up = curr_p > sma_short and sma_short > sma_long
+    trend_down = curr_p < sma_short and sma_short < sma_long
 
-    # Robot döntési mechanizmus
     if st.session_state.ai_broker:
         if not st.session_state.active_trade:
-            if buy_sig: manage_trade("OPEN", "LONG", curr_p)
-            elif sell_sig: manage_trade("OPEN", "SHORT", curr_p)
+            if trend_up: manage_trade("OPEN", "LONG", curr_p)
+            elif trend_down: manage_trade("OPEN", "SHORT", curr_p)
         else:
-            # Kilépés csak akkor, ha a trend határozottan megfordult (exit_threshold)
+            # Csak akkor száll ki, ha a trend határozottan megfordul
             side = st.session_state.active_trade['side']
-            if (side == "LONG" and diff < -exit_threshold) or (side == "SHORT" and diff > exit_threshold):
+            if (side == "LONG" and curr_p < sma_long) or (side == "SHORT" and curr_p > sma_long):
                 manage_trade("CLOSE", None, curr_p)
 
     # UI: EGYENLEG
-    st.markdown(f'<div class="wallet-header"><h1 style="color:white;margin:0;">{st.session_state.wallet:,.0f} Ft</h1></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="wallet-header"><h1 style="color:white;margin:0;">{st.session_state.wallet:,.0f} Ft</h1><small style="color:#f1c40f;">TREND-KÖVETŐ STRATÉGIA</small></div>', unsafe_allow_html=True)
     
-    # UI: MATEMATIKAI KÖZÉPPONTÚ KAPCSOLÓ
-    st.markdown('<div class="robot-title-box"><span style="color:#00d4ff; font-weight:900;">🤖 ROBOT BRÓKER ÜZEMMÓD</span></div>', unsafe_allow_html=True)
-    with st.container():
-        # 3 egyenlő oszlop, a középsőben a kapcsolóval
-        col_l, col_c, col_r = st.columns([1, 1, 1])
-        with col_c:
-            st.session_state.ai_broker = st.toggle("STATUS", value=st.session_state.ai_broker, label_visibility="collapsed")
-    st.markdown('<div class="robot-toggle-box"></div>', unsafe_allow_html=True)
+    # UI: ROBOT PANEL (GARANTÁLT KÖZÉPPONT)
+    st.markdown('<div class="robot-container"><h3 style="color:#00d4ff; margin-bottom:15px;">🤖 ROBOT VEZÉRLÉS</h3>', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([1,1,1])
+    with c2:
+        st.session_state.ai_broker = st.toggle("STATUS", value=st.session_state.ai_broker)
+    st.markdown('</div>', unsafe_allow_html=True)
 
     # UI: SZIGNÁL
-    sig_color = "#2ecc71" if buy_sig else "#e74c3c" if sell_sig else "#7f8c8d"
-    st.markdown(f'<div class="signal-box" style="background-color: {sig_color};"><h2 style="color:white;margin:0;font-weight:900;">{"VÉTEL 🚀" if buy_sig else "ELADÁS 📉" if sell_sig else "TREND FIGYELÉS..."}</h2></div>', unsafe_allow_html=True)
+    sig_text = "ERŐS EMELKEDÉS 🚀" if trend_up else "ERŐS LEJTMENET 📉" if trend_down else "OLDALAZÁS ⚖️"
+    sig_col = "#2ecc71" if trend_up else "#e74c3c" if trend_down else "#7f8c8d"
+    st.markdown(f'<div class="signal-box" style="background-color:{sig_col};"><b>{sig_text}</b></div>', unsafe_allow_html=True)
 
-    # GRAFIKON KONSTRUKCIÓ (Fixált megjelenítés)
+    # GRAFIKON KONSTRUKCIÓ (STABIL VERZIÓ)
     fig = go.Figure()
-    pdf = l.tail(60).copy()
+    chart_df = l.tail(60)
     
-    # Halvány háttér árfolyam
-    fig.add_trace(go.Scatter(x=pdf.index, y=pdf['Close'], mode='lines', line=dict(color='gray', width=1), opacity=0.4))
+    # Alap árfolyam
+    fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['Close'], mode='lines', line=dict(color='white', width=1), name='Ár'))
     
-    # Aktív trade követése
+    # Aktív trade színes követése
     if st.session_state.active_trade:
         t = st.session_state.active_trade
         entry_dt = pd.to_datetime(t['time'])
-        # Csak azokat a pontokat vesszük, amik a belépés óta vannak
-        trade_points = pdf[pdf.index >= entry_dt]
+        trade_slice = chart_df[chart_df.index >= entry_dt]
         t_color = "#2ecc71" if t['side'] == "LONG" else "#e74c3c"
         
-        if not trade_points.empty:
-            # Vastag követő vonal
-            fig.add_trace(go.Scatter(x=trade_points.index, y=trade_points['Close'], mode='lines+markers', line=dict(color=t_color, width=6), marker=dict(size=4)))
-            # Sárga csillag a belépésnél
-            fig.add_trace(go.Scatter(x=[trade_points.index[0]], y=[t['entry']], mode='markers', marker=dict(color='yellow', size=20, symbol='star')))
+        if not trade_slice.empty:
+            # Vastag vonal a belépéstől
+            fig.add_trace(go.Scatter(x=trade_slice.index, y=trade_slice['Close'], mode='lines+markers', line=dict(color=t_color, width=6), marker=dict(size=4)))
+            # Belépési pont
+            fig.add_trace(go.Scatter(x=[trade_slice.index[0]], y=[t['entry']], mode='markers', marker=dict(color='yellow', size=15, symbol='star')))
 
-    fig.update_layout(template="plotly_dark", height=450, margin=dict(l=10,r=10,t=10,b=10), showlegend=False, xaxis_rangeslider_visible=False)
+    fig.update_layout(template="plotly_dark", height=400, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False, showlegend=False)
     st.plotly_chart(fig, use_container_width=True)
 
-    # GOMBOK ÉS INFÓK
-    b1, b2, b3 = st.columns(3)
-    with b1: 
+    # MANUÁLIS GOMBOK
+    m1, m2, m3 = st.columns(3)
+    with m1: 
         if st.button("🚀 VÉTEL", use_container_width=True): manage_trade("OPEN", "LONG", curr_p)
-    with b2: 
+    with m2: 
         if st.button("📉 ELADÁS", use_container_width=True): manage_trade("OPEN", "SHORT", curr_p)
-    with b3: 
+    with m3: 
         if st.button("❌ ZÁRÁS", use_container_width=True): manage_trade("CLOSE", None, curr_p)
 
-    st.write(f"**Aktuális Brent Ár:** ${curr_p:.2f} | **AI Jóslat:** ${pred_p:.2f}")
+    # NAPLÓ
     if st.session_state.history:
         st.table(pd.DataFrame(st.session_state.history).tail(3))
 
