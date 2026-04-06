@@ -32,22 +32,14 @@ st.markdown("""
     .stat-label { color: #FFFFFF; font-size: 11px; font-weight: 800; text-transform: uppercase; display: block; }
     .stat-value { color: #00ffcc; font-size: 18px; font-weight: 900; display: block; }
     
-    /* EGYENLEG ÉS ROBOT EGY MEZŐBEN */
-    .wallet-header { 
-        background: linear-gradient(90deg, #161b22, #232d39); 
-        border: 2px solid #f1c40f; 
-        padding: 20px; 
-        border-radius: 15px; 
-        text-align: center; 
-        margin-bottom: 5px; 
-    }
-    .robot-mini-label { font-size: 16px; font-weight: bold; color: #00d4ff; margin-top: 5px; text-transform: uppercase; }
+    /* MEZŐK STÍLUSA */
+    .wallet-header { background: #161b22; border: 2px solid #f1c40f; padding: 15px; border-radius: 15px; text-align: center; margin-bottom: 10px; }
+    .robot-header { background: #1c2128; border: 2px solid #00d4ff; padding: 15px; border-radius: 15px; text-align: center; margin-bottom: 10px; }
     
     /* ÓRIÁS KAPCSOLÓ */
-    .stToggle > div { transform: scale(2.8); margin: 30px 0; justify-content: center; }
+    .stToggle > div { transform: scale(2.8); margin: 35px 0; justify-content: center; }
     
-    /* SZIGNÁL PANEL */
-    .signal-box { padding: 20px; border-radius: 15px; text-align: center; border: 4px solid #ffffff; margin-top: 10px; margin-bottom: 15px; }
+    .signal-box { padding: 20px; border-radius: 15px; text-align: center; border: 4px solid #ffffff; margin-bottom: 15px; }
     .signal-title { font-size: 30px !important; color: #ffffff !important; font-weight: 900; margin: 0 !important; }
     </style>
     """, unsafe_allow_html=True)
@@ -111,27 +103,23 @@ if df is not None:
     buy_pct = 100 if pred_p > curr_p else 0
     sell_pct = 100 - buy_pct
 
-    # --- 1. EGYENLEG ÉS ROBOT VEZÉRLÉS ---
-    st.markdown(f"""
-        <div class="wallet-header">
-            <h3 style="color:#f1c40f;margin:0;">VIRTUÁLIS EGYENLEG</h3>
-            <h1 style="color:white;margin:0;">{st.session_state.wallet:,.0f} Ft</h1>
-            <div class="robot-mini-label">🤖 Robot Bróker Vezérlés</div>
-        </div>
-    """, unsafe_allow_html=True)
+    # --- 1. VIRTUÁLIS EGYENLEG ---
+    st.markdown(f"""<div class="wallet-header"><h3 style="color:#f1c40f;margin:0;">VIRTUÁLIS EGYENLEG</h3><h1 style="color:white;margin:0;">{st.session_state.wallet:,.0f} Ft</h1></div>""", unsafe_allow_html=True)
     
+    # --- 2. ROBOT BRÓKER VEZÉRLÉS ---
+    st.markdown(f"""<div class="robot-header"><h3 style="color:#00d4ff;margin:0;font-size:18px;">🤖 ROBOT BRÓKER VEZÉRLÉS</h3></div>""", unsafe_allow_html=True)
     col_ki, col_sw, col_be = st.columns([1,2,1])
-    with col_ki: st.markdown('<p style="color:#e74c3c; font-size:22px; font-weight:900; text-align:right; margin-top:40px;">KI</p>', unsafe_allow_html=True)
+    with col_ki: st.markdown('<p style="color:#e74c3c; font-size:24px; font-weight:900; text-align:right; margin-top:35px;">KI</p>', unsafe_allow_html=True)
     with col_sw: st.session_state.ai_broker = st.toggle("", value=st.session_state.ai_broker, label_visibility="collapsed")
-    with col_be: st.markdown('<p style="color:#2ecc71; font-size:22px; font-weight:900; text-align:left; margin-top:40px;">BE</p>', unsafe_allow_html=True)
+    with col_be: st.markdown('<p style="color:#2ecc71; font-size:24px; font-weight:900; text-align:left; margin-top:35px;">BE</p>', unsafe_allow_html=True)
 
-    # --- 2. SZIGNÁL MEZŐ (Robot Bróker alatt) ---
+    # --- 3. SZIGNÁL PANEL ---
     color = "#2ecc71" if buy_pct > 50 else "#e74c3c"
     st.markdown(f"""<div class="signal-box" style="background-color: {color};">
         <div class="signal-title">{"VÉTEL! 🚀" if buy_pct > 50 else "ELADÁS! 📉"} ({max(buy_pct, sell_pct)}%)</div>
     </div>""", unsafe_allow_html=True)
 
-    # --- 3. MANUÁLIS GOMBOK ---
+    # --- 4. MANUÁLIS GOMBOK ---
     m1, m2, m3 = st.columns(3)
     with m1: 
         if st.button("🚀 VÉTEL", use_container_width=True): manage_trade("OPEN", "LONG", curr_p)
@@ -140,7 +128,7 @@ if df is not None:
     with m3: 
         if st.button("❌ ZÁRÁS", use_container_width=True): manage_trade("CLOSE", None, curr_p)
 
-    # --- 4. 2x3 RÁCS ---
+    # --- 5. 2x3 RÁCS ---
     t_hu = datetime.now(pytz.timezone('Europe/Budapest')).strftime("%H:%M:%S")
     t_ny = datetime.now(pytz.timezone('America/New_York')).strftime("%H:%M:%S")
     st.markdown(f"""<div class="mobile-grid">
@@ -152,29 +140,33 @@ if df is not None:
         <div class="stat-card"><span class="stat-label">Eladás</span><span class="stat-value">{sell_pct}%</span></div>
     </div>""", unsafe_allow_html=True)
 
-    # --- 5. DINAMIKUS GRAFIKON ---
+    # --- 6. DINAMIKUS GRAFIKON (FIXÁLT VIZUALIZÁCIÓ) ---
     fig = go.Figure()
     p_df = df.tail(60).copy()
-    fig.add_trace(go.Scatter(x=p_df.index, y=p_df['Close'], mode='lines', name="Ár", line=dict(color='white', width=2)))
+    fig.add_trace(go.Scatter(x=p_df.index, y=p_df['Close'], mode='lines', name="Brent Ár", line=dict(color='white', width=2)))
 
     if st.session_state.active_trade:
         t = st.session_state.active_trade
-        active_mask = p_df.index >= t['time']
-        active_segment = p_df[active_mask]
+        # Aktív szakasz keresése (idő alapú szűrés)
+        active_df = p_df[p_df.index >= t['time']]
         scol = "#2ecc71" if t['side'] == "LONG" else "#e74c3c"
         
-        if not active_segment.empty:
-            fig.add_trace(go.Scatter(x=active_segment.index, y=active_segment['Close'], mode='lines', line=dict(color=scol, width=12), name="AKTÍV"))
-            fig.add_trace(go.Scatter(x=[active_segment.index[0]], y=[t['entry']], mode='markers', marker=dict(color='yellow', size=25, symbol='star'), name="START"))
+        if not active_df.empty:
+            # 1. Vastag tartás vonal
+            fig.add_trace(go.Scatter(x=active_df.index, y=active_df['Close'], mode='lines', line=dict(color=scol, width=12), name="TARTÁS"))
+            # 2. Sárga csillag a belépésnél
+            fig.add_trace(go.Scatter(x=[active_df.index[0]], y=[t['entry']], mode='markers', marker=dict(color='yellow', size=25, symbol='star'), name="BELÉPÉS"))
+        
+        fig.add_hline(y=t['entry'], line_dash="dash", line_color="yellow")
 
     if st.session_state.last_exit:
         le = st.session_state.last_exit
-        fig.add_trace(go.Scatter(x=[p_df.index[-1]], y=[le['price']], mode='markers', marker=dict(color='white', size=20, symbol='x'), name="EXIT"))
+        fig.add_trace(go.Scatter(x=[p_df.index[-1]], y=[le['price']], mode='markers', marker=dict(color='white', size=20, symbol='x'), name="UTOLSÓ KILÉPÉS"))
 
     fig.update_layout(template="plotly_dark", height=450, margin=dict(l=0,r=0,t=10,b=0), xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-    # --- 6. FOLYAMATOS ROBOT LOGIKA ---
+    # --- 7. ROBOT LOGIKA ---
     if st.session_state.ai_broker:
         if not st.session_state.active_trade:
             if diff > 0.04: manage_trade("OPEN", "LONG", curr_p)
