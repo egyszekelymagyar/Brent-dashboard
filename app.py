@@ -1,137 +1,118 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
 import feedparser
 import time
-import requests
+from sklearn.ensemble import RandomForestRegressor
 from datetime import datetime
 
 # =================================================================
-# 1. ELITE TERMINAL DESIGN
+# 1. KONFIGURÁCIÓ
 # =================================================================
-st.set_page_config(page_title="BRENT AI MULTI-TF PRO", layout="wide")
+st.set_page_config(page_title="BRENT AI PREDICATOR", layout="wide")
 
 st.markdown("""
     <style>
     .main { background-color: #0e1117; }
-    .metric-card { background-color: #1a1c24; padding: 15px; border-radius: 10px; border: 1px solid #30363d; text-align: center; }
-    .signal-hero { padding: 30px; border-radius: 20px; text-align: center; margin: 20px 0; border: 3px solid white; }
+    .prediction-card { background-color: #1a1c24; padding: 20px; border-radius: 15px; border: 2px solid #f1c40f; text-align: center; margin-bottom: 20px; }
+    .signal-hero { padding: 30px; border-radius: 20px; text-align: center; margin-bottom: 20px; border: 3px solid white; }
     </style>
     """, unsafe_allow_html=True)
 
 # =================================================================
-# 2. ADATKEZELŐ ÉS ELEMZŐ MOTOR (MULTI-TF)
+# 2. ADAT ÉS GÉPI TANULÁS (ML) MOTOR
 # =================================================================
 @st.cache_data(ttl=60)
-def get_all_data():
-    # Az összes szükséges idősík letöltése
-    tfs = {"1m": "1d", "5m": "5d", "1h": "1mo"}
-    results = {}
-    for tf, prd in tfs.items():
-        df = yf.download("BZ=F", period=prd, interval=tf, progress=False)
-        # Multi-index fix (Yahoo Finance új formátum)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        results[tf] = df.dropna()
-    return results
+def get_data():
+    df = yf.download("BZ=F", period="5d", interval="5m", progress=False)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    return df.dropna()
 
-def get_sentiment():
-    # Élő hír-szentiment (RSS)
-    feed = feedparser.parse("https://google.com")
-    score = 0.5
-    headlines = []
-    bullish = ['rise', 'cut', 'shortage', 'demand', 'up', 'conflict', 'war']
-    bearish = ['drop', 'glut', 'surplus', 'down', 'recession', 'lower']
+def train_prediction_model(df):
+    # Feature Engineering (Jellemzők kinyerése)
+    df = df.copy()
+    df['Sma_5'] = df['Close'].rolling(5).mean()
+    df['Sma_20'] = df['Close'].rolling(20).mean()
+    df['Vol_Change'] = df['Volume'].pct_change()
+    df = df.dropna()
     
-    for entry in feed.entries[:5]:
-        text = entry.title.lower()
-        headlines.append(entry.title)
-        for w in bullish: 
-            if w in text: score += 0.08
-        for w in bearish: 
-            if w in text: score -= 0.08
-    return min(max(score, 0.1), 0.9), headlines
-
-# =================================================================
-# 3. KALKULÁCIÓ ÉS LOGIKA
-# =================================================================
-data = get_all_data()
-sent_score, news = get_sentiment()
-
-# Elemzés idősíkonként
-tf_scores = []
-for tf in ["1m", "5m", "1h"]:
-    df = data[tf]
-    df['SMA20'] = df['Close'].rolling(20).mean()
-    # RSI számítás
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    df['RSI'] = 100 - (100 / (1 + (gain/loss)))
+    # X (Múltbeli adatok), y (Következő Close ár)
+    X = df[['Open', 'High', 'Low', 'Close', 'Sma_5', 'Sma_20']].values
+    y = df['Close'].shift(-1).fillna(df['Close']).values # A cél a következő ár
     
-    last = df.iloc[-1]
-    # Pontozás: Ár vs SMA (0.5 pont) + RSI (0.5 pont)
-    score = 0
-    if last['Close'] > last['SMA20']: score += 0.5
-    if last['RSI'] < 40: score += 0.5  # Vételi lehetőség
-    if last['RSI'] > 60: score -= 0.5  # Eladási nyomás
-    tf_scores.append(score)
-
-# FÚZIÓ: 40% Technikai (Multi-TF átlag) + 60% Szentiment
-tech_avg = sum(tf_scores) / 3
-# Skálázás 0-100 közé (egyszerűsített modell)
-final_score = (sent_score * 60) + (tech_avg * 40) + 20 
-final_score = min(max(final_score, 5), 95)
+    # Modell tanítása (Random Forest)
+    model = RandomForestRegressor(n_estimators=50, random_state=42)
+    model.fit(X[:-1], y[:-1]) # Az utolsó sort kihagyjuk a tanításból
+    
+    # Jóslat az utolsó ismert adatsorból
+    last_row = X[-1].reshape(1, -1)
+    predicted_price = model.predict(last_row)[0]
+    return predicted_price
 
 # =================================================================
-# 4. DASHBOARD MEGJELENÍTÉS
+# 3. FŐ LOGIKA ÉS SZIGNÁL FÚZIÓ
 # =================================================================
-st.title("🏦 BRENT AI - MULTI-TIMEFRAME TERMINAL")
+df = get_data()
+pred_price = train_prediction_model(df)
+curr_price = df.iloc[-1]['Close']
+price_diff = pred_price - curr_price
 
-# Felső metrikák
-m1, m2, m3, m4 = st.columns(4)
-curr_price = data["1m"].iloc[-1]['Close']
-m1.metric("AKTUÁLIS ÁR", f"${curr_price:.2f}")
-m2.metric("SZENTIMENT", f"{sent_score:.2f}")
-m3.metric("RSI (5m)", f"{data['5m'].iloc[-1]['RSI']:.1f}")
-m4.metric("TREND (1h)", "UP 🟢" if tf_scores[2] > 0 else "DOWN 🔴")
+# Hagyományos szentiment lekérése
+feed = feedparser.parse("https://google.com")
+sent_val = 0.5
+for entry in feed.entries[:3]:
+    if any(w in entry.title.lower() for w in ['cut', 'rise', 'shortage']): sent_val += 0.1
+    if any(w in entry.title.lower() for w in ['drop', 'surplus', 'glut']): sent_val -= 0.1
 
-# SZIGNÁL PANEL
-if final_score > 70: 
-    status, color = "ERŐS VÉTEL! 🚀", "#2ecc71"
-elif final_score < 30: 
-    status, color = "ERŐS ELADÁS! 📉", "#e74c3c"
-else: 
-    status, color = "VÁRAKOZÁS ⚖️", "#34495e"
+# ÖSSZESÍTETT AI PONT (ML + SZENTIMENT)
+# Ha a jósolt ár magasabb és a szentiment is jó -> Vétel
+ml_signal = 1 if pred_price > curr_price else -1
+final_score = (ml_signal * 40) + (sent_val * 100) # 0-100 skála környéke
 
-st.markdown(f"""<div class="signal-hero" style="background-color: {color};">
-    <h1 style="color: white; font-size: 50px; margin: 0;">{status}</h1>
-    <h2 style="color: white; opacity: 0.9;">Összetett Bizalmi Index: {final_score:.1f}%</h2>
-</div>""", unsafe_allow_html=True)
+# =================================================================
+# 4. MEGJELENÍTÉS (UI)
+# =================================================================
+st.title("🤖 BRENT AI - MACHINE LEARNING TERMINAL")
 
-# Grafikon és Hírek
-col_left, col_right = st.columns([2, 1])
+col_top1, col_top2 = st.columns([1, 1])
 
-with col_left:
-    fig = go.Figure()
-    df_p = data["5m"].tail(100)
-    fig.add_trace(go.Candlestick(x=df_p.index, open=df_p['Open'], high=df_p['High'], low=df_p['Low'], close=df_p['Close'], name="Brent 5m"))
-    fig.update_layout(template="plotly_dark", height=450, margin=dict(l=0,r=0,t=0,b=0))
-    st.plotly_chart(fig, use_container_width=True)
+with col_top1:
+    direction = "EMELKEDÉS 📈" if pred_price > curr_price else "CSÖKKENÉS 📉"
+    diff_pct = (price_diff / curr_price) * 100
+    st.markdown(f"""<div class="prediction-card">
+        <h3 style="color: #f1c40f; margin:0;">ML JÓSLAT (KÖV. 5 PERC)</h3>
+        <h1 style="font-size: 45px; margin:10px;">${pred_price:.2f}</h1>
+        <p style="font-size: 20px;">Várható irány: <b>{direction} ({diff_pct:+.2f}%)</b></p>
+    </div>""", unsafe_allow_html=True)
 
-with col_right:
-    st.subheader("📰 Piaci Hírek")
-    for n in news:
-        st.info(n)
+with col_top2:
+    if final_score > 75: status, color = "VÉTEL! 🚀", "#2ecc71"
+    elif final_score < 45: status, color = "ELADÁS! 📉", "#e74c3c"
+    else: status, color = "SEMLEGES ⚖️", "#34495e"
+    
+    st.markdown(f"""<div class="signal-hero" style="background-color: {color};">
+        <h3 style="margin:0;">AI ÖSSZESÍTETT JELZÉS</h3>
+        <h1 style="font-size: 45px; margin:10px;">{status}</h1>
+        <p>Szentiment + ML Konfluencia: {final_score:.1f}%</p>
+    </div>""", unsafe_allow_html=True)
 
-# Vezérlő pult a sidebaron
+# Grafikon
+fig = go.Figure()
+df_plot = df.tail(50)
+fig.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name="Brent"))
+# Jósolt pont vizualizálása
+fig.add_trace(go.Scatter(x=[df_plot.index[-1]], y=[pred_price], mode='markers', marker=dict(color='yellow', size=15, symbol='star'), name="Jósolt Ár"))
+fig.update_layout(template="plotly_dark", height=400, margin=dict(l=0,r=0,t=0,b=0))
+st.plotly_chart(fig, use_container_width=True)
+
+# Sidebar & Auto-refresh
 with st.sidebar:
-    st.header("⚙️ Beállítások")
-    refresh = st.toggle("Automata frissítés (30s)", value=True)
-    t_token = st.text_input("Telegram Bot Token", type="password")
-    t_cid = st.text_input("Chat ID")
-
+    st.header("⚙️ ML Kontroll")
+    st.info("A modell 50 Random Forest fát használ a predikcióhoz.")
+    refresh = st.toggle("Auto-Frissítés (30s)", value=True)
     if refresh:
         time.sleep(30)
         st.rerun()
