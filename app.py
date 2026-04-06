@@ -34,7 +34,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # =================================================================
-# 2. ADATKEZELÉS (HIBAVÉDÉLEMMEL)
+# 2. ADATKEZELÉS (HIBAVÉDELEMMEL)
 # =================================================================
 @st.cache_data(ttl=30)
 def load_market_data():
@@ -42,6 +42,8 @@ def load_market_data():
         df = yf.download("BZ=F", period="5d", interval="5m", progress=False)
         if df.empty or len(df) < 20: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+        # Időzóna eltávolítása az indexből az összehasonlításhoz
+        if df.index.tz is not None: df.index = df.index.tz_localize(None)
         return df.dropna()
     except: return None
 
@@ -60,8 +62,8 @@ def get_sentiment():
         score = 0.5
         for entry in feed.entries[:3]:
             txt = entry.title.lower()
-            if any(w in txt for w in ['rise', 'cut', 'shortage', 'demand']): score += 0.1
-            if any(w in txt for w in ['drop', 'glut', 'surplus', 'down']): score -= 0.1
+            if any(w in txt for w in ['rise', 'cut', 'shortage']): score += 0.1
+            if any(w in txt for w in ['drop', 'glut', 'down']): score -= 0.1
         return min(max(score, 0.1), 0.9), [e.title for e in feed.entries[:3]]
     except: return 0.5, ["Hírek nem elérhetőek"]
 
@@ -71,7 +73,12 @@ def get_sentiment():
 def manage_trade(action, side, price, risk=75):
     if action == "OPEN":
         inv = st.session_state.wallet * (risk / 100)
-        st.session_state.active_trade = {'side': side, 'entry': price, 'amt': inv, 'time': datetime.now(pytz.timezone('Europe/Budapest'))}
+        st.session_state.active_trade = {
+            'side': side, 
+            'entry': price, 
+            'amt': inv, 
+            'time': datetime.now() # Lokális időzóna nélküli idő
+        }
     elif action == "CLOSE":
         t = st.session_state.active_trade
         pnl = (price - t['entry']) / t['entry']
@@ -82,7 +89,7 @@ def manage_trade(action, side, price, risk=75):
         st.session_state.active_trade = None
 
 # =================================================================
-# 4. FŐ DASHBOARD FUTTATÁSA
+# 4. DASHBOARD ÉS LOGIKA
 # =================================================================
 df = load_market_data()
 
@@ -92,8 +99,7 @@ if df is not None:
     sent_val, news = get_sentiment()
     diff = pred_p - curr_p
     
-    # --- SZIGNÁL FÚZIÓ SZÁMÍTÁSA ---
-    # ML irány (50%) + Szentiment (50%)
+    # SZÁZALÉKOS SZIGNÁL SZÁMÍTÁSA
     ml_score = 100 if pred_p > curr_p else 0
     buy_pct = (ml_score * 0.5) + (sent_val * 100 * 0.5)
     sell_pct = 100 - buy_pct
@@ -109,11 +115,10 @@ if df is not None:
             st.session_state.history = []
             st.rerun()
 
-    # 1. PÉNZTÁRCA
+    # UI: Pénztárca & Rács
     glow = "ai-glow" if st.session_state.ai_broker else ""
     st.markdown(f"""<div class="wallet-header {glow}"><h3 style="color:#f1c40f;margin:0;">SZIMULÁLT EGYENLEG</h3><h1 style="color:white;margin:0;">{st.session_state.wallet:,.0f} Ft</h1></div>""", unsafe_allow_html=True)
 
-    # 2. MOBIL RÁCS
     t_hu = datetime.now(pytz.timezone('Europe/Budapest')).strftime("%H:%M:%S")
     st.markdown(f"""
         <div class="mobile-grid">
@@ -124,7 +129,7 @@ if df is not None:
         </div>
     """, unsafe_allow_html=True)
 
-    # 3. NAGY SZÁZALÉKOS SZIGNÁL PANEL
+    # UI: NAGY SZÁZALÉKOS PANEL
     if buy_pct > 65: status, color = "ERŐS VÉTEL! 🚀", "#2ecc71"
     elif sell_pct > 65: status, color = "ERŐS ELADÁS! 📉", "#e74c3c"
     else: status, color = "VÁRAKOZÁS ⚖️", "#95a5a6"
@@ -152,7 +157,7 @@ if df is not None:
         with c3: 
             if st.button("❌ ZÁRÁS", use_container_width=True): manage_trade("CLOSE", None, curr_p)
 
-    # 4. GRAFIKON
+    # --- GRAFIKON (JAVÍTOTT IDŐZÓNA KEZELÉSSEL) ---
     fig = go.Figure()
     p_df = df.tail(60)
     fig.add_trace(go.Scatter(x=p_df.index, y=p_df['Close'], name="Ár", line=dict(color='white', width=1.5)))
@@ -160,7 +165,8 @@ if df is not None:
     if st.session_state.active_trade:
         t = st.session_state.active_trade
         scol = "#2ecc71" if t['side'] == "LONG" else "#e74c3c"
-        mask = p_df.index >= t['time'].replace(tzinfo=None)
+        # Biztonságos összehasonlítás (már mindkettő tz-naive)
+        mask = p_df.index >= t['time']
         segment = p_df[mask]
         if not segment.empty:
             fig.add_trace(go.Scatter(x=segment.index, y=segment['Close'], line=dict(color=scol, width=6), name="ÜZLET"))
@@ -169,8 +175,8 @@ if df is not None:
     fig.update_layout(template="plotly_dark", height=400, margin=dict(l=0,r=0,t=10,b=0), paper_bgcolor='#0e1117', plot_bgcolor='#0e1117')
     st.plotly_chart(fig, use_container_width=True)
 
-    # 5. HÍREK ÉS NAPLÓ
-    st.subheader("📰 Piaci Hangulat & Hírek")
+    # Hírek
+    st.subheader("📰 Piaci Hírek")
     for n in news: st.caption(f"• {n}")
     
     if st.session_state.history: 
@@ -181,6 +187,6 @@ if df is not None:
     st.rerun()
 
 else:
-    st.warning("⚠️ NINCS ADAT. A tőzsde valószínűleg zárva van vagy szünetel.")
-    time.sleep(60)
+    st.warning("⏳ Adatok betöltése vagy a tőzsde zárva...")
+    time.sleep(10)
     st.rerun()
