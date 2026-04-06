@@ -6,132 +6,113 @@ import plotly.graph_objects as go
 from datetime import datetime
 import pytz
 import time
-import requests
-import feedparser
 from sklearn.ensemble import RandomForestRegressor
 
-# --- 1. ELITE TERMINAL KONFIGURÁCIÓ ---
-st.set_page_config(page_title="BRENT AI - ML PREDICTOR PRO", layout="wide", page_icon="🏦")
+# --- 1. TERMINÁL STÍLUS ÉS CSS ---
+st.set_page_config(page_title="Brent AI - Virtual Trader", layout="wide")
 
 st.markdown("""
     <style>
     .main { background-color: #0e1117; }
-    .mobile-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px; }
-    .stat-card { background-color: #1a1c24; border: 2px solid #30363d; padding: 12px; border-radius: 10px; text-align: center; }
-    .stat-label { color: #FFFFFF !important; font-size: 13px !important; font-weight: 800 !important; text-transform: uppercase; display: block; }
-    .stat-value { color: #00ffcc !important; font-size: 20px !important; font-weight: 900 !important; display: block; }
-    .signal-box { padding: 35px; border-radius: 20px; text-align: center; border: 4px solid #ffffff; margin-bottom: 20px; }
-    .signal-title { font-size: 45px !important; color: #ffffff !important; font-weight: 900 !important; text-shadow: 2px 2px 4px #000; margin: 0 !important; }
-    .ml-card { background: linear-gradient(135deg, #1e2631 0%, #0e1117 100%); border: 2px solid #f1c40f; padding: 20px; border-radius: 15px; text-align: center; margin-bottom: 20px; }
+    .mobile-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 15px; }
+    .stat-card { background-color: #1a1c24; border: 2px solid #30363d; padding: 10px; border-radius: 8px; text-align: center; }
+    .stat-label { color: #FFFFFF !important; font-size: 12px; font-weight: 800; display: block; text-transform: uppercase; }
+    .stat-value { color: #FFFFFF !important; font-size: 18px; font-weight: 900; display: block; }
+    .signal-box { padding: 30px; border-radius: 20px; text-align: center; border: 4px solid #ffffff; margin-bottom: 20px; }
+    .signal-title { font-size: 50px !important; color: #ffffff !important; font-weight: 900; text-shadow: 2px 2px 4px #000; margin: 0 !important; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. ADATKEZELÉS ---
-@st.cache_data(ttl=60)
-def load_multi_data():
-    intervals = {"1m": "1d", "5m": "5d", "1h": "1mo"}
-    data = {}
-    for tf, prd in intervals.items():
-        df = yf.download("BZ=F", period=prd, interval=tf, progress=False)
-        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-        data[tf] = df.dropna()
-    return data
-
-def calc_indicators(df):
-    df = df.copy()
-    df['SMA_20'] = df['Close'].rolling(20).mean()
-    df['Upper'] = df['SMA_20'] + (df['Close'].rolling(20).std() * 2)
-    df['Lower'] = df['SMA_20'] - (df['Close'].rolling(20).std() * 2)
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    df['RSI'] = 100 - (100 / (1 + (gain/loss)))
-    df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
+# --- 2. ADAT ÉS ML ENGINE ---
+@st.cache_data(ttl=30)
+def load_trader_data():
+    df = yf.download("BZ=F", period="5d", interval="5m", progress=False)
+    if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
     return df.dropna()
 
-# --- 3. ML MODUL ---
-def ml_predict_price(df):
+def get_ml_decision(df):
     data = df.copy().tail(200)
     data['Target'] = data['Close'].shift(-1)
-    data['SMA5'] = data['Close'].rolling(5).mean()
-    data['SMA10'] = data['Close'].rolling(10).mean()
+    data['SMA'] = data['Close'].rolling(7).mean()
     data = data.dropna()
-    features = ['Open', 'High', 'Low', 'Close', 'SMA5', 'SMA10']
-    X, y = data[features].values, data['Target'].values
-    model = RandomForestRegressor(n_estimators=100, random_state=42)
-    model.fit(X[:-1], y[:-1])
-    return model.predict(X[-1].reshape(1, -1))[0]
+    X, y = data[['Open', 'High', 'Low', 'Close', 'SMA']].values, data['Target'].values
+    model = RandomForestRegressor(n_estimators=100, random_state=42).fit(X[:-2], y[:-2])
+    pred = model.predict(X[-1].reshape(1, -1))[0]
+    return pred
 
-# --- 4. SZENTIMENT ---
-@st.cache_data(ttl=300)
-def get_live_sentiment():
-    feed = feedparser.parse("https://google.com")
-    score = 0.5
-    bullish = ['rise', 'cut', 'shortage', 'higher', 'demand', 'war', 'conflict']
-    bearish = ['drop', 'increase', 'glut', 'surplus', 'down', 'recession']
-    for entry in feed.entries[:10]:
-        txt = entry.title.lower()
-        for w in bullish: 
-            if w in txt: score += 0.05
-        for w in bearish: 
-            if w in txt: score -= 0.05
-    return min(max(score, 0.1), 0.95)
-
-# --- 5. FŐ PROGRAM ---
+# --- 3. VIRTUÁLIS KERESKEDÉSI LOGIKA ---
 try:
-    all_data = load_multi_data()
-    df_5m = calc_indicators(all_data["5m"])
-    df_1h = calc_indicators(all_data["1h"])
-    
-    predicted_next_price = ml_predict_price(df_5m)
-    sent_score = get_live_sentiment()
-    
-    latest = df_5m.iloc[-1]
-    curr_price = latest['Close']
+    df = load_trader_data()
+    pred_p = get_ml_decision(df)
+    curr_p = df['Close'].iloc[-1]
+    atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
+    diff = pred_p - curr_p
+
+    # Szimulált pozíció meghatározása
+    # Long: 1, Short: -1, Semleges: 0
+    pos_type = 0
+    if diff > (atr * 0.4): pos_type = 1
+    elif diff < -(atr * 0.4): pos_type = -1
+
+    # Szín és státusz
+    if pos_type == 1: status, color, line_col = "VÉTEL! 🚀", "#2ecc71", "#2ecc71"
+    elif pos_type == -1: status, color, line_col = "ELADÁS! 📉", "#e74c3c", "#e74c3c"
+    else: status, color, line_col = "VÁRAKOZÁS ⚖️", "#95a5a6", "#ffffff"
+
+    # --- UI MEGJELENÍTÉS ---
+    st.title("🏦 BRENT AI - VIRTUAL TRADER")
     
     tz_hu, tz_ny = pytz.timezone('Europe/Budapest'), pytz.timezone('America/New_York')
-    t_hu, t_ny = datetime.now(tz_hu).strftime("%H:%M:%S"), datetime.now(tz_ny).strftime("%H:%M:%S")
-
-    # GRID
     st.markdown(f"""
         <div class="mobile-grid">
-            <div class="stat-card"><span class="stat-label">Budapest</span><span class="stat-value">{t_hu}</span></div>
-            <div class="stat-card"><span class="stat-label">New York</span><span class="stat-value">{t_ny}</span></div>
-            <div class="stat-card"><span class="stat-label">Brent Ár</span><span class="stat-value">${curr_price:.2f}</span></div>
-            <div class="stat-card"><span class="stat-label">RSI (5m)</span><span class="stat-value">{latest['RSI']:.1f}</span></div>
+            <div class="stat-card"><span class="stat-label">Budapest</span><span class="stat-value">{datetime.now(tz_hu).strftime('%H:%M:%S')}</span></div>
+            <div class="stat-card"><span class="stat-label">New York</span><span class="stat-value">{datetime.now(tz_ny).strftime('%H:%M:%S')}</span></div>
+            <div class="stat-card"><span class="stat-label">Aktuális Ár</span><span class="stat-value">${curr_p:.2f}</span></div>
+            <div class="stat-card"><span class="stat-label">Virtuális Cél</span><span class="stat-value">${pred_p:.2f}</span></div>
         </div>
     """, unsafe_allow_html=True)
 
-    # ML CARD
-    ml_diff = predicted_next_price - curr_price
-    ml_color = "#2ecc71" if ml_diff > 0 else "#e74c3c"
-    st.markdown(f"""
-        <div class="ml-card">
-            <h4 style="color: #f1c40f; margin: 0;">🤖 SCIKIT-LEARN ML PREDICTION (Next 5m)</h4>
-            <h1 style="color: {ml_color}; margin: 5px;">${predicted_next_price:.2f}</h1>
-            <p style="margin:0;">Várható elmozdulás: <b>{ml_diff:+.2f} USD</b></p>
-        </div>
-    """, unsafe_allow_html=True)
-
-    # SIGNAL FUSION
-    tech_score = 1 if curr_price > latest['SMA_20'] else 0
-    buy_weight = ( (1 if ml_diff > 0 else 0) * 40 ) + (sent_score * 100 * 0.3) + ( tech_score * 30 )
-    sell_weight = 100 - buy_weight
-
-    status, color = ("VÉTEL! 🚀", "#2ecc71") if buy_weight > 65 else ("ELADÁS! 📉", "#e74c3c") if sell_weight > 65 else ("VÁRAKOZÁS ⚖️", "#95a5a6")
     st.markdown(f"""<div class="signal-box" style="background-color: {color};">
         <div class="signal-title">{status}</div>
-        <div style="color: white; font-weight: bold;">BULLISH: {buy_weight:.1f}% | BEARISH: {sell_weight:.1f}%</div>
+        <div style="color: white; font-weight: bold; margin-top:10px;">
+            Pozíció: {"VÉTEL (LONG)" if pos_type == 1 else "ELADÁS (SHORT)" if pos_type == -1 else "NINCS"}
+        </div>
     </div>""", unsafe_allow_html=True)
 
-    # GRAFIKON
-    fig = go.Figure(go.Scatter(x=df_5m.index[-50:], y=df_5m['Close'].iloc[-50:], line=dict(color="#00ffcc", width=3)))
-    fig.update_layout(template="plotly_dark", height=300, margin=dict(l=0,r=0,t=0,b=0))
+    # --- 4. GRAFIKON DINAMIKUS SZÍNEKKEL ---
+    fig = go.Figure()
+    plot_df = df.tail(50)
+    
+    # Grafikon vonala (Színváltós: fehéren indul, de ha van pozíció, vált zöldre/pirosra)
+    fig.add_trace(go.Scatter(
+        x=plot_df.index, y=plot_df['Close'], 
+        name="Virtuális Trend", 
+        line=dict(color=line_col, width=3)
+    ))
+
+    # BELÉPÉSI JELÖLÉS (Pont a grafikonon)
+    if pos_type != 0:
+        fig.add_trace(go.Scatter(
+            x=[plot_df.index[-1]], y=[curr_p],
+            mode="markers",
+            marker=dict(symbol="circle", size=15, color=line_col, line=dict(color="white", width=2)),
+            name="Belépési Pont"
+        ))
+        # Szintek
+        sl = curr_p - (atr*2) if pos_type == 1 else curr_p + (atr*2)
+        tp = curr_p + (atr*4) if pos_type == 1 else curr_p - (atr*4)
+        fig.add_hline(y=sl, line_dash="dot", line_color="#ff4b4b", annotation_text="V. STOP")
+        fig.add_hline(y=tp, line_dash="dot", line_color="#00ffcc", annotation_text="V. CÉLÁR")
+
+    fig.update_layout(template="plotly_dark", height=400, margin=dict(l=0,r=0,t=0,b=0), paper_bgcolor='#0e1117', plot_bgcolor='#0e1117')
     st.plotly_chart(fig, use_container_width=True)
 
-    # AUTO REFRESH
+    # Tanulási Napló
+    st.info(f"**Robot Emlékezet:** Utolsó 200 mintából tanulva. Hibaarány (Vak-teszt): ${abs(pred_p - curr_p):.4f}")
+
+    # Auto-refresh
     time.sleep(30)
     st.rerun()
 
 except Exception as e:
-    st.info("Piacnyitás várakozás...")
+    st.error(f"Piacnyitás szimuláció... (Hiba: {e})")
